@@ -26,7 +26,9 @@ Celem projektu jest opracowanie, optymalizacja oraz wyjaśnialna ewaluacja (XAI)
 ```text
 PROJEKT1/
 ├── README.md                                       # Dokumentacja projektu i instrukcja uruchomienia
-├── requirements.txt                                # Zależności środowiska Python
+├── pyproject.toml                                  # Projekt i zależności zarządzane przez uv
+├── uv.lock                                         # Powtarzalne, zablokowane wersje zależności
+├── config.py                                       # Wspólna konfiguracja przenośnych ścieżek
 ├── Raport Końcowy Przykład.docx                    # Oryginalny szablon sprawozdania
 ├── Raport Końcowy - Kamil Rayski, Miłosz Pabis.docx # Wypełniony raport końcowy (.docx) gotowy do oddania
 ├── Raport_Koncowy_PneumoniaMNIST.docx              # Kopia raportu końcowego (.docx)
@@ -60,33 +62,34 @@ PROJEKT1/
 
 ## 3. Instrukcja uruchomienia krok po kroku
 
-### Krok 1: Aktywacja środowiska wirtualnego i instalacja zależności
-Z poziomu głównego katalogu repozytorium (`SEM2`) lub katalogu projektu (`UM/PROJEKT1`):
+### Krok 1: Instalacja `uv` i synchronizacja zależności
+Z poziomu katalogu projektu uruchom:
 ```bash
-/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/.venv/bin/pip install -r /Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/requirements.txt
+uv sync
 ```
+Środowisko `.venv` zostanie utworzone automatycznie na podstawie `pyproject.toml` i `uv.lock`.
 
 ### Krok 2: Pobranie zbioru danych przez `kagglehub`
 ```bash
-/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/.venv/bin/python /Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/download_data.py
+uv run python download_data.py
 ```
 *(Zbiór jest automatycznie zapisywany w katalogu lokalnym `UM/PROJEKT1/data/`, dzięki czemu kolejne uruchomienia nie wymagają ponownego pobierania).*
 
 ### Krok 3: Uruchomienie pełnego potoku eksperymentalnego (EDA + PCA + Modele ML + Sieć CNN + Wykresy)
 ```bash
-/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/.venv/bin/python /Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/run_pipeline.py
-/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/.venv/bin/python /Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/update_eval_and_ui_fig.py
+uv run python run_pipeline.py
+uv run python update_eval_and_ui_fig.py
 ```
 
 ### Krok 4: Wygenerowanie wypełnionego raportu końcowego `.docx` oraz notatnika `.ipynb`
 ```bash
-/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/.venv/bin/python /Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/generate_report_docx.py
-/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/.venv/bin/python /Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/build_notebook.py
+uv run python generate_report_docx.py
+uv run python build_notebook.py
 ```
 
 ### Krok 5: Uruchomienie interaktywnej aplikacji diagnostycznej (Streamlit GUI)
 ```bash
-/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/.venv/bin/streamlit run /Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/app.py
+uv run streamlit run app.py
 ```
 Po uruchomieniu aplikacja jest dostępna w przeglądarce pod adresem **http://localhost:8501**.
 

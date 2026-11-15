@@ -1,10 +1,19 @@
 import os
-import sys
 import json
-from pathlib import Path
 
-os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib_cache"
-sys.path.insert(0, "/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1")
+from config import (
+    CLASSICAL_MODELS_PATH,
+    CNN_MODEL_PATH,
+    DATASET_METADATA_PATH,
+    FIGURES_DIR,
+    MATPLOTLIB_CACHE_DIR,
+    METRICS_SUMMARY_PATH,
+    ensure_runtime_dirs,
+    resolve_project_path,
+)
+
+ensure_runtime_dirs()
+os.environ["MPLCONFIGDIR"] = str(MATPLOTLIB_CACHE_DIR)
 
 import numpy as np
 import pandas as pd
@@ -20,7 +29,7 @@ from sklearn.metrics import roc_curve, precision_recall_curve
 
 from run_pipeline import (
     PneumoniaCNN, ChestXRayCNNDataset, compute_metrics_dict,
-    extract_engineered_features, PROJECT_DIR, FIGURES_DIR, MODELS_DIR
+    extract_engineered_features,
 )
 
 plt.rcParams["figure.dpi"] = 150
@@ -28,11 +37,12 @@ plt.rcParams["savefig.dpi"] = 180
 sns.set_theme(style="whitegrid", palette="muted")
 
 def main():
-    meta = pd.read_csv(MODELS_DIR / "dataset_metadata.csv")
-    with open(MODELS_DIR / "metrics_summary.json", "r", encoding="utf-8") as f:
+    meta = pd.read_csv(DATASET_METADATA_PATH)
+    meta["filepath"] = meta["filepath"].map(resolve_project_path)
+    with open(METRICS_SUMMARY_PATH, "r", encoding="utf-8") as f:
         summary = json.load(f)
 
-    classical_bundle = joblib.load(MODELS_DIR / "classical_models.joblib")
+    classical_bundle = joblib.load(CLASSICAL_MODELS_PATH)
     ml_size = classical_bundle["ml_size"]
 
     # Load test & val images for classical ML
@@ -71,7 +81,7 @@ def main():
     }
 
     # CNN predictions on test set
-    ckpt = torch.load(MODELS_DIR / "cnn_pneumonia.pt", map_location="cpu", weights_only=False)
+    ckpt = torch.load(CNN_MODEL_PATH, map_location="cpu", weights_only=False)
     model = PneumoniaCNN(2)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -260,7 +270,7 @@ def main():
     plt.savefig(FIGURES_DIR / "fig10_ui_preview.png", bbox_inches="tight")
     plt.close(fig)
 
-    with open(MODELS_DIR / "metrics_summary.json", "w", encoding="utf-8") as f:
+    with open(METRICS_SUMMARY_PATH, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     print("[SUCCESS] Updated figures 5, 6, 9, 10 and metrics_summary.json!")
 

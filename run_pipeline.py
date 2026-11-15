@@ -1,12 +1,26 @@
 import os
-import sys
 import json
 import time
 import random
 from pathlib import Path
 
-os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib_cache"
-os.environ["KAGGLEHUB_CACHE"] = "/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/data"
+from config import (
+    CLASSICAL_MODELS_PATH,
+    CNN_MODEL_PATH,
+    DATA_DIR,
+    DATASET_METADATA_PATH,
+    FIGURES_DIR,
+    KAGGLE_DATASET_CACHE_DIR,
+    KAGGLE_DATASET_ID,
+    MATPLOTLIB_CACHE_DIR,
+    METRICS_SUMMARY_PATH,
+    PROJECT_DIR,
+    ensure_runtime_dirs,
+)
+
+ensure_runtime_dirs()
+os.environ["MPLCONFIGDIR"] = str(MATPLOTLIB_CACHE_DIR)
+os.environ["KAGGLEHUB_CACHE"] = str(DATA_DIR)
 
 import numpy as np
 import pandas as pd
@@ -41,25 +55,19 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-PROJECT_DIR = Path("/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1")
-FIGURES_DIR = PROJECT_DIR / "figures"
-MODELS_DIR = PROJECT_DIR / "models"
-FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
 plt.rcParams["figure.dpi"] = 150
 plt.rcParams["savefig.dpi"] = 180
 plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "Helvetica"]
 sns.set_theme(style="whitegrid", palette="muted")
 
 
-def resolve_dataset_path() -> Path:
-    local_cached = PROJECT_DIR / "data/datasets/paultimothymooney/chest-xray-pneumonia/versions/2/chest_xray"
-    if local_cached.exists():
-        print(f"[INFO] Using cached dataset at: {local_cached}")
-        return local_cached
+def resolve_dataset_path():
+    cached_versions = sorted(KAGGLE_DATASET_CACHE_DIR.glob("versions/*/chest_xray"), reverse=True)
+    if cached_versions:
+        print(f"[INFO] Using cached dataset at: {cached_versions[0]}")
+        return cached_versions[0]
     import kagglehub
-    path = kagglehub.dataset_download("paultimothymooney/chest-xray-pneumonia")
+    path = kagglehub.dataset_download(KAGGLE_DATASET_ID)
     print("Path to dataset files:", path)
     return Path(path) / "chest_xray"
 
@@ -426,8 +434,12 @@ def main():
     df, flat_images = compute_image_stats_and_features(df, ml_size=ml_size)
     generate_eda_figures(df, flat_images, ml_size=ml_size)
 
-    # Save metadata CSV
-    df.to_csv(MODELS_DIR / "dataset_metadata.csv", index=False)
+    # Persist portable paths while retaining full paths for this pipeline run.
+    metadata_df = df.copy()
+    metadata_df["filepath"] = metadata_df["filepath"].map(
+        lambda path: os.path.relpath(path, PROJECT_DIR)
+    )
+    metadata_df.to_csv(DATASET_METADATA_PATH, index=False)
 
     # Prepare train/val/test arrays for classical ML
     eng_features = extract_engineered_features(flat_images, ml_size=ml_size)
@@ -584,7 +596,7 @@ def main():
         "rf": best_rf,
         "svm": best_svm,
         "ml_size": ml_size
-    }, MODELS_DIR / "classical_models.joblib")
+    }, CLASSICAL_MODELS_PATH)
 
     # ---------------------------------------------------------
     # 4. PyTorch Convolutional Neural Network (PneumoniaCNN)
@@ -672,7 +684,7 @@ def main():
         "img_size": img_size_cnn,
         "history": history,
         "best_val_auc": best_val_auc
-    }, MODELS_DIR / "cnn_pneumonia.pt")
+    }, CNN_MODEL_PATH)
 
     # Get CNN validation & test probabilities
     model.eval()
@@ -975,10 +987,10 @@ def main():
         "subtype_test_accuracy_cnn": {x[0].replace("\n", " "): {"accuracy_pct": float(x[1]), "count": x[2]} for x in sub_acc_data},
         "elapsed_seconds": float(time.time() - t0)
     }
-    with open(MODELS_DIR / "metrics_summary.json", "w", encoding="utf-8") as f:
+    with open(METRICS_SUMMARY_PATH, "w", encoding="utf-8") as f:
         json.dump(summary_payload, f, indent=2, ensure_ascii=False)
 
-    print(f"[SUCCESS] Pipeline completed in {time.time() - t0:.1f}s! Summary saved to {MODELS_DIR / 'metrics_summary.json'}.")
+    print(f"[SUCCESS] Pipeline completed in {time.time() - t0:.1f}s! Summary saved to {METRICS_SUMMARY_PATH}.")
 
 
 if __name__ == "__main__":

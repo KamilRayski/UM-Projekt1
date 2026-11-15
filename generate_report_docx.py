@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 import docx
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -7,10 +6,13 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-PROJECT_DIR = Path("/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1")
-TEMPLATE_PATH = PROJECT_DIR / "Raport Końcowy Przykład.docx"
-FIGURES_DIR = PROJECT_DIR / "figures"
-MODELS_DIR = PROJECT_DIR / "models"
+from config import (
+    FIGURES_DIR,
+    METRICS_SUMMARY_PATH,
+    REPORT_AUTHORS_PATH,
+    REPORT_PATH,
+    REPORT_TEMPLATE_PATH,
+)
 
 
 def set_cell_shading(cell, color_hex: str):
@@ -138,10 +140,10 @@ def add_heading_3(doc, text: str):
 
 
 def build_report():
-    with open(MODELS_DIR / "metrics_summary.json", "r", encoding="utf-8") as f:
+    with open(METRICS_SUMMARY_PATH, "r", encoding="utf-8") as f:
         summary = json.load(f)
 
-    doc = docx.Document(str(TEMPLATE_PATH))
+    doc = docx.Document(str(REPORT_TEMPLATE_PATH))
 
     # 1. Update Title Page in place (Paragraphs 0..19)
     # Paragraph 11 is 'xxx' under 'Temat Projektu:'
@@ -678,12 +680,12 @@ def build_report():
     )
     add_bullet_point(doc, "PneumoniaMNIST_Analiza_i_Modelowanie.ipynb – ", "interaktywny notatnik Jupyter zawierający pełny kod eksploracji danych (EDA), inżynierii cech, redukcji wymiarowości PCA, trenowania modeli, ewaluacji oraz wizualizacji XAI / Grad-CAM.")
     add_bullet_point(doc, "run_pipeline.py – ", "kompletny skrypt potoku obliczeniowego pobierający zbiór przez kagglehub, trenujący modele i generujący wykresy (Rysunki 1–10) oraz plik podsumowania metryk models/metrics_summary.json.")
-    add_bullet_point(doc, "app.py – ", "aplikacja webowa z interfejsem graficznym (Streamlit) do interaktywnej diagnostyki zdjęć RTG płuc (uruchamiana poleceniem: streamlit run app.py).")
+    add_bullet_point(doc, "app.py – ", "aplikacja webowa z interfejsem graficznym (Streamlit) do interaktywnej diagnostyki zdjęć RTG płuc (uruchamiana poleceniem: uv run streamlit run app.py).")
     add_bullet_point(doc, "Katalog figures/ – ", "zestaw 10 wykresów i wizualizacji w wysokiej rozdzielczości (fig1_class_distribution.png – fig10_ui_preview.png).")
     add_bullet_point(doc, "Katalog models/ – ", "zapisane wagi wytrenowanej sieci konwolucyjnej (cnn_pneumonia.pt), potoki modeli klasycznych (classical_models.joblib) oraz metadane zbioru (dataset_metadata.csv).")
 
-    out_path_1 = PROJECT_DIR / "Raport_Koncowy_PneumoniaMNIST.docx"
-    out_path_2 = PROJECT_DIR / "Raport Końcowy - Kamil Rayski, Miłosz Pabis.docx"
+    out_path_1 = REPORT_PATH
+    out_path_2 = REPORT_AUTHORS_PATH
     doc.save(str(out_path_1))
     doc.save(str(out_path_2))
     print(f"[SUCCESS] Saved DOCX reports to:\n  - {out_path_1}\n  - {out_path_2}")

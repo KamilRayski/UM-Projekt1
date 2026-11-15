@@ -1,11 +1,14 @@
 import os
 
-os.environ["KAGGLEHUB_CACHE"] = "/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/data"
+from config import DATA_DIR, KAGGLE_DATASET_ID, ensure_runtime_dirs
+
+ensure_runtime_dirs()
+os.environ["KAGGLEHUB_CACHE"] = str(DATA_DIR)
 
 import kagglehub
 
 # Download latest version
-path = kagglehub.dataset_download("paultimothymooney/chest-xray-pneumonia")
+path = kagglehub.dataset_download(KAGGLE_DATASET_ID)
 
 print("Path to dataset files:", path)
 

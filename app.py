@@ -1,7 +1,16 @@
 import os
-from pathlib import Path
 
-os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib_cache"
+from config import (
+    CLASSICAL_MODELS_PATH,
+    CNN_MODEL_PATH,
+    DATASET_METADATA_PATH,
+    MATPLOTLIB_CACHE_DIR,
+    ensure_runtime_dirs,
+    resolve_project_path,
+)
+
+ensure_runtime_dirs()
+os.environ["MPLCONFIGDIR"] = str(MATPLOTLIB_CACHE_DIR)
 
 import numpy as np
 import pandas as pd
@@ -15,10 +24,6 @@ from torchvision import transforms
 
 from run_pipeline import PneumoniaCNN, extract_engineered_features
 
-PROJECT_DIR = Path(__file__).resolve().parent
-MODELS_DIR = PROJECT_DIR / "models"
-FIGURES_DIR = PROJECT_DIR / "figures"
-
 st.set_page_config(
     page_title="PneumoniaMNIST – System Wspomagania Diagnostyki RTG Płuc",
     page_icon="🫁",
@@ -28,8 +33,8 @@ st.set_page_config(
 
 @st.cache_resource
 def load_all_models():
-    classical_bundle = joblib.load(MODELS_DIR / "classical_models.joblib")
-    cnn_ckpt = torch.load(MODELS_DIR / "cnn_pneumonia.pt", map_location="cpu", weights_only=False)
+    classical_bundle = joblib.load(CLASSICAL_MODELS_PATH)
+    cnn_ckpt = torch.load(CNN_MODEL_PATH, map_location="cpu", weights_only=False)
     cnn_model = PneumoniaCNN(num_classes=2)
     cnn_model.load_state_dict(cnn_ckpt["model_state_dict"])
     cnn_model.eval()
@@ -98,12 +103,13 @@ def main():
         "rentgenowskich klatki piersiowej. Autorzy: **Kamil Rayski, Miłosz Pabis** (*Politechnika Krakowska*)."
     )
 
-    if not (MODELS_DIR / "classical_models.joblib").exists():
-        st.warning("Modele nie zostały jeszcze wytrenowane. Uruchom najpierw `python run_pipeline.py`.")
+    if not CLASSICAL_MODELS_PATH.exists():
+        st.warning("Modele nie zostały jeszcze wytrenowane. Uruchom najpierw `uv run python run_pipeline.py`.")
         return
 
     classical_bundle, cnn_model, img_size = load_all_models()
-    meta_df = pd.read_csv(MODELS_DIR / "dataset_metadata.csv")
+    meta_df = pd.read_csv(DATASET_METADATA_PATH)
+    meta_df["filepath"] = meta_df["filepath"].map(resolve_project_path)
     test_df = meta_df[meta_df["split"] == "test"].reset_index(drop=True)
 
     col_left, col_right = st.columns([1, 2.1])
