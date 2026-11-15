@@ -1,4 +1,7 @@
 import json
+import shutil
+from pathlib import Path
+
 import docx
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -9,10 +12,10 @@ from docx.oxml.ns import qn
 from config import (
     FIGURES_DIR,
     METRICS_SUMMARY_PATH,
-    REPORT_AUTHORS_PATH,
     REPORT_PATH,
-    REPORT_TEMPLATE_PATH,
+    resolve_report_template,
 )
+from report_metrics import build_dataset_split_rows_docx
 
 
 def set_cell_shading(cell, color_hex: str):
@@ -139,11 +142,102 @@ def add_heading_3(doc, text: str):
     return h
 
 
+def _pl_pct(value: float) -> str:
+    return f"{value * 100:.2f}%".replace(".", ",")
+
+
+def _pl_auc(value: float) -> str:
+    return f"{value:.4f}".replace(".", ",")
+
+
+def _format_param_dict(params: dict) -> str:
+    pairs = []
+    for key, val in params.items():
+        if val is None:
+            val_s = "brak limitu" if key == "max_depth" else "None"
+        else:
+            val_s = str(val)
+        pairs.append(f"{key} = {val_s}")
+    return ", ".join(pairs)
+
+
+def build_hyperparam_rows(summary: dict) -> list[list[str]]:
+    rows = []
+    name_map = {
+        "Logistic Regression": "Logistic Regression (PCA)",
+        "Random Forest": "Random Forest",
+        "SVM (RBF)": "SVM (RBF + PCA)",
+        "PneumoniaCNN (PyTorch)": "PneumoniaCNN (PyTorch)",
+    }
+    search_space = {
+        "Logistic Regression": "C ∈ {0.01, 0.1, 1.0, 10.0}, class_weight ∈ {None, 'balanced'}",
+        "Random Forest": "n_estimators ∈ {150, 300}, max_depth ∈ {12, 24, None}, class_weight ∈ {'balanced', 'balanced_subsample'}",
+        "SVM (RBF)": "C ∈ {0.5, 1.0, 5.0, 10.0}, gamma ∈ {'scale', 0.001, 0.0005}, class_weight ∈ {None, 'balanced'}",
+        "PneumoniaCNN (PyTorch)": "Architektura 4-blokowa, Dropout, AdamW lr=1e-3, CosineAnnealingLR, Weighted CE",
+    }
+    for model_key, info in summary["best_params_summary"].items():
+        label = name_map.get(model_key, model_key)
+        val_metrics = summary["results_summary"][model_key]["val"]
+        rows.append(
+            [
+                label,
+                search_space.get(model_key, "—"),
+                _format_param_dict(info.get("best_params", {})),
+                f"{info.get('cv_roc_auc', 0):.4f}".replace(".", ",") + f" (Val ROC-AUC: {_pl_auc(val_metrics['roc_auc'])})",
+            ]
+        )
+    return rows
+
+
+def build_evaluation_rows(summary: dict) -> list[list[str]]:
+    rows = []
+    specs = [
+        ("Logistic Regression", "Walidacyjny, n=524", "val"),
+        ("Random Forest", "Walidacyjny, n=524", "val"),
+        ("SVM (RBF)", "Walidacyjny, n=524", "val"),
+        ("PneumoniaCNN (PyTorch)", "Walidacyjny, n=524", "val"),
+        ("Logistic Regression", "Testowy – próg 0,50", "test_default"),
+        ("Random Forest", "Testowy – próg 0,50", "test_default"),
+        ("SVM (RBF)", "Testowy – próg 0,50", "test_default"),
+        ("PneumoniaCNN (PyTorch)", "Testowy – próg 0,50", "test_default"),
+        ("Logistic Regression", "Testowy – próg z walidacji (Youden)", "test_val_threshold"),
+        ("Random Forest", "Testowy – próg z walidacji (Youden)", "test_val_threshold"),
+        ("SVM (RBF)", "Testowy – próg z walidacji (Youden)", "test_val_threshold"),
+        ("PneumoniaCNN (PyTorch)", "Testowy – próg z walidacji (Youden)", "test_val_threshold"),
+    ]
+    short = {
+        "Logistic Regression": "Logistic Regression",
+        "Random Forest": "Random Forest",
+        "SVM (RBF)": "SVM RBF",
+        "PneumoniaCNN (PyTorch)": "PneumoniaCNN",
+    }
+    for model_key, split_label, block in specs:
+        m = summary["results_summary"][model_key][block]
+        rows.append(
+            [
+                f"{short[model_key]} ({split_label})",
+                _pl_pct(m["accuracy"]),
+                _pl_pct(m["balanced_accuracy"]),
+                _pl_pct(m["precision"]),
+                _pl_pct(m["recall"]),
+                _pl_pct(m["specificity"]),
+                _pl_pct(m["f1"]),
+                _pl_auc(m["roc_auc"]),
+            ]
+        )
+    return rows
+
+
 def build_report():
+    if not METRICS_SUMMARY_PATH.is_file():
+        raise FileNotFoundError(
+            f"Brak {METRICS_SUMMARY_PATH}. Uruchom najpierw: uv run python run_pipeline.py"
+        )
+    template_path = resolve_report_template()
     with open(METRICS_SUMMARY_PATH, "r", encoding="utf-8") as f:
         summary = json.load(f)
 
-    doc = docx.Document(str(REPORT_TEMPLATE_PATH))
+    doc = docx.Document(str(template_path))
 
     # 1. Update Title Page in place (Paragraphs 0..19)
     # Paragraph 11 is 'xxx' under 'Temat Projektu:'
@@ -243,12 +337,7 @@ def build_report():
     add_formatted_table(
         doc,
         headers=["Podzbiór danych", "Oryginalny NORMAL", "Oryginalny PNEUMONIA", "Skorygowany NORMAL", "Skorygowany PNEUMONIA", "Łącznie (po korekcie)"],
-        rows=[
-            ["Zbiór treningowy (train)", "1 341 (25,7%)", "3 875 (74,3%)", "1 214 (25,8%)", "3 494 (74,2%)", "4 708 (80,4%)"],
-            ["Zbiór walidacyjny (val)", "8 (50,0%)", "8 (50,0%)", "135 (25,8%)", "389 (74,2%)", "524 (8,9%)"],
-            ["Zbiór testowy (test)", "234 (37,5%)", "390 (62,5%)", "234 (37,5%)", "390 (62,5%)", "624 (10,7%)"],
-            ["Razem (cały zbiór)", "1 583 (27,0%)", "4 273 (73,0%)", "1 583 (27,0%)", "4 273 (73,0%)", "5 856 (100,0%)"]
-        ]
+        rows=build_dataset_split_rows_docx(summary),
     )
 
     add_heading_3(doc, "Zakres projektu:")
@@ -274,8 +363,9 @@ def build_report():
         "obrazach RTG. Jak przedstawiono na Rysunku 1, oryginalny podział zbioru z repozytorium Kaggle posiadał "
         "jedynie 16 zdjęć walidacyjnych. Aby zapewnić rzetelną ocenę modeli w trakcie strojenia hiperparametrów "
         "(i uniknąć wycieku informacji ze zbioru testowego), połączono oryginalne podzbiory train i val, a następnie "
-        "dokonano stratyfikowanego podziału (względem klasy oraz podtypu bakterie/wirusy) w proporcji 90% : 10%, "
-        "uzyskując 4 708 zdjęć treningowych oraz 524 zdjęcia walidacyjne – co dokładnie odpowiada architekturze "
+        "dokonano stratyfikowanego, grupowego podziału (StratifiedGroupKFold po identyfikatorze studium/pacjenta "
+        "wyciągniętym z nazwy pliku) w proporcji ok. 90% : 10%, uzyskując 4 708 zdjęć treningowych oraz 524 zdjęcia "
+        "walidacyjne – co dokładnie odpowiada architekturze "
         "zbioru referencyjnego PneumoniaMNIST. Oryginalny zbiór testowy (n = 624) pozostawiono w pełni nienaruszony."
     )
 
@@ -423,8 +513,9 @@ def build_report():
         "NORMAL) oraz w_1 = 0,674 (dla klasy PNEUMONIA). Sieć CNN trenowano przez 15 epok na akceleratorze "
         "Apple Silicon GPU (MPS) z użyciem optymalizatora AdamW (learning rate = 1e-3, weight_decay = 1e-4, "
         "batch_size = 64) oraz harmonogramu kosinusowego CosineAnnealingLR (Rysunek 7). Dodatkowo, z uwagi na "
-        "różnicę rozkładu klas i ekspozycji zdjęć pomiędzy zbiorem treningowym a testowym, przeprowadzono "
-        "kalibrację progu decyzyjnego maksymalizującą statystykę Youdena (J = Czułość + Swoistość - 1)."
+        "różnicę rozkładu klas i ekspozycji zdjęć pomiędzy zbiorem treningowym a testowym, progi decyzyjne "
+        "(Youden J) dobierano wyłącznie na walidacji, a na zbiór testowy nanoszono bez dalszego strojenia. "
+        "Prawdopodobieństwa raportowano po skalowaniu Platta (dopasowanym na walidacji)."
     )
 
     add_figure_with_caption(
@@ -437,20 +528,16 @@ def build_report():
     add_body_paragraph(
         doc,
         "Dla klasycznych modeli uczenia maszynowego przeprowadzono systematyczne przeszukiwanie siatki parametrów "
-        "(GridSearchCV) z 5-krotną stratyfikowaną walidacją krzyżową (5-fold Stratified K-Fold CV) na zbiorze "
-        "treningowym, optymalizując metrykę ROC-AUC. Zestawienie badanych przestrzeni poszukiwań oraz optymalnych "
-        "konfiguracji prezentuje poniższa tabela."
+        "(GridSearchCV) z 5-krotną stratyfikowaną, grupową walidacją krzyżową "
+        "(5-fold StratifiedGroupKFold; bez wycieku pacjentów/studiów) na zbiorze treningowym, optymalizując "
+        "metrykę ROC-AUC. Preprocessing (skalowanie, PCA, cechy domenowe) znajduje się wewnątrz potoków sklearn. "
+        "Zestawienie badanych przestrzeni poszukiwań oraz optymalnych konfiguracji prezentuje poniższa tabela."
     )
 
     add_formatted_table(
         doc,
         headers=["Model", "Przeszukiwana przestrzeń hiperparametrów", "Wybrana konfiguracja optymalna", "5-Fold CV / Val ROC-AUC"],
-        rows=[
-            ["Logistic Regression (PCA)", "C ∈ {0.01, 0.1, 1.0, 10.0}, class_weight ∈ {None, 'balanced'}", "C = 10.0, class_weight = 'balanced'", "0,9917 (Val: 0,9892)"],
-            ["Random Forest", "n_estimators ∈ {150, 300}, max_depth ∈ {12, 24, None}, class_weight ∈ {'balanced', 'balanced_subsample'}", "n_estimators = 300, max_depth = 24, class_weight = 'balanced_subsample'", "0,9865 (Val: 0,9901)"],
-            ["SVM (RBF + PCA)", "C ∈ {0.5, 1.0, 5.0, 10.0}, gamma ∈ {'scale', 0.001, 0.0005}, class_weight ∈ {None, 'balanced'}", "C = 5.0, gamma = 'scale', class_weight = 'balanced'", "0,9953 (Val: 0,9955)"],
-            ["PneumoniaCNN (PyTorch)", "Architektura 4-blokowa (32-64-128-256), Dropout(0.4/0.25), AdamW lr=1e-3, CosineAnnealingLR", "Epoka 15 (najwyższy wynik walidacyjny), Weighted Cross-Entropy", "0,9980 (Val: 0,9980)"]
-        ]
+        rows=build_hyperparam_rows(summary),
     )
 
     add_heading_3(doc, "Ewaluacja:")
@@ -462,45 +549,64 @@ def build_report():
         "zdolność poprawnego wykluczenia choroby u pacjenta zdrowego), Precyzji (PPV – Positive Predictive Value), "
         "zbalansowanej dokładności (Balanced Accuracy), mierze F1-score oraz polach pod krzywymi ROC-AUC i PR-AUC "
         "(Average Precision). Wyniki uzyskane na zbiorze walidacyjnym (n = 524) oraz niezależnym zbiorze testowym "
-        "(n = 624 – w trybie przesiewowym przy progu domyślnym 0,50 oraz po kalibracji progu decyzyjnego) "
-        "zestawiono w tabeli poniżej oraz na Rysunkach 5 i 6."
+        "(n = 624 – przy progu 0,50 oraz przy progach ustalonych na walidacji) "
+        "zestawiono w tabeli poniżej oraz na Rysunkach 5 i 6. Wartości pochodzą z "
+        "`models/metrics_summary.json`."
     )
 
     add_formatted_table(
         doc,
         headers=["Model (Zbiór i tryb)", "Accuracy", "Balanced Acc", "Precision", "Recall (Czułość)", "Specificity (Swoistość)", "F1-score", "ROC-AUC"],
-        rows=[
-            ["Logistic Regression (Walidacyjny, n=524)", "95,42%", "94,74%", "97,65%", "96,14%", "93,33%", "96,89%", "0,9892"],
-            ["Random Forest (Walidacyjny, n=524)", "96,18%", "93,80%", "96,24%", "98,71%", "88,89%", "97,46%", "0,9901"],
-            ["SVM RBF (Walidacyjny, n=524)", "97,33%", "96,51%", "98,20%", "98,20%", "94,81%", "98,20%", "0,9955"],
-            ["PneumoniaCNN (Walidacyjny, n=524)", "98,09%", "97,99%", "99,22%", "98,20%", "97,78%", "98,71%", "0,9980"],
-            ["Logistic Regression (Testowy – kalibrowany)", "81,41%", "80,60%", "86,05%", "83,85%", "77,35%", "84,94%", "0,8869"],
-            ["SVM RBF (Testowy – kalibrowany)", "82,69%", "82,74%", "88,95%", "82,56%", "82,91%", "85,64%", "0,9039"],
-            ["Random Forest (Testowy – kalibrowany)", "88,14%", "86,75%", "89,11%", "92,31%", "81,20%", "90,68%", "0,9349"],
-            ["PneumoniaCNN (Testowy – próg 0,50 przesiewowy)", "83,01%", "77,69%", "79,10%", "98,97%", "56,41%", "87,93%", "0,9421"],
-            ["PneumoniaCNN (Testowy – kalibrowany)", "88,14%", "88,12%", "92,47%", "88,21%", "88,03%", "90,29%", "0,9421"]
-        ]
+        rows=build_evaluation_rows(summary),
     )
 
+    paired = summary.get("bootstrap_paired_auc_comparisons_test", [])
+    if paired:
+        add_heading_3(doc, "Bootstrap: porównania par ROC-AUC na teście")
+        pair_rows = []
+        for item in paired:
+            ci = ""
+            if item.get("ci_diff_low") is not None:
+                ci = (
+                    f"różnica {item['mean_auc_diff']:.4f} "
+                    f"[{item['ci_diff_low']:.4f}, {item['ci_diff_high']:.4f}], "
+                    f"P(A>B)={item['p_a_greater_b']:.3f}"
+                )
+            pair_rows.append([item["model_a"], item["model_b"], ci or "—"])
+        add_formatted_table(
+            doc,
+            headers=["Model A", "Model B", "Paired bootstrap (AUC różnica / P(A>B))"],
+            rows=pair_rows,
+        )
+
+    cnn_key = "PneumoniaCNN (PyTorch)"
+    rs = summary["results_summary"]
+    val_cnn = rs[cnn_key]["val"]
+    test_def = rs[cnn_key]["test_default"]
+    test_thr = rs[cnn_key]["test_val_threshold"]
+    boot = rs[cnn_key].get("bootstrap_roc_auc", {})
+    boot_txt = ""
+    if boot.get("ci_low") is not None:
+        boot_txt = (
+            f" (bootstrap 95% CI: {_pl_auc(boot['ci_low'])}–{_pl_auc(boot['ci_high'])})"
+        )
     add_body_paragraph(
         doc,
-        "Analiza wyników prowadzi do bardzo istotnych wniosków klinicznych i metodologicznych. Na zbiorze "
-        "walidacyjnym (pochodzącym z tego samego rozkładu co zbiór treningowy) wszystkie cztery modele osiągają "
-        "znakomite rezultaty (ROC-AUC od 0,9892 do 0,9980), przy czym sieć konwolucyjna PneumoniaCNN osiąga "
-        "najwyższą dokładność 98,09%, czułość 98,20% oraz swoistość aż 97,78% (myląc zaledwie 3 zdrowych pacjentów "
-        "na 135). Na niezależnym zbiorze testowym (n = 624) sieć PneumoniaCNN również uzyskuje najwyższą zdolność "
-        "dyskryminacyjną mierzoną niezależnie od progu: ROC-AUC = 0,9421 oraz PR-AUC = 0,9596. Przy domyślnym "
-        "progu 0,50 sieć działa jako ultraczuły test przesiewowy (Recall = 98,97% – wykrywa 386 z 390 przypadków "
-        "zapalenia płuc, przepuszczając jedynie 4 chorych!). Z kolei po kalibracji progu decyzyjnego uwzględniającej "
-        "zmianę proporcji klas w zbiorze testowym, PneumoniaCNN osiąga najwyższą zbalansowaną dokładność "
-        "(Balanced Accuracy = 88,12%), najwyższą precyzję (92,47%) oraz najwyższą swoistość (88,03%), "
-        "redukując liczbę fałszywych alarmów do zaledwie 28 przypadków przy 206 poprawnie rozpoznanych zdrowych płucach."
+        f"Na zbiorze walidacyjnym sieć PneumoniaCNN osiąga dokładność {_pl_pct(val_cnn['accuracy'])}, "
+        f"czułość {_pl_pct(val_cnn['recall'])} oraz ROC-AUC {_pl_auc(val_cnn['roc_auc'])}. "
+        f"Na niezależnym zbiorze testowym (n = 624) ROC-AUC wynosi {_pl_auc(test_def['roc_auc'])}{boot_txt}, "
+        f"a PR-AUC {_pl_auc(test_def['pr_auc'])}. Przy progu domyślnym 0,50 sieć uzyskuje czułość "
+        f"{_pl_pct(test_def['recall'])} i swoistość {_pl_pct(test_def['specificity'])}. "
+        f"Po nałożeniu progu ustalonego wyłącznie na walidacji (Youden J, bez strojenia na teście) "
+        f"metryki testowe CNN to m.in. balanced accuracy {_pl_pct(test_thr['balanced_accuracy'])}, "
+        f"precyzja {_pl_pct(test_thr['precision'])} i swoistość {_pl_pct(test_thr['specificity'])}."
     )
 
     add_figure_with_caption(
         doc,
         FIGURES_DIR / "fig5_model_comparison_roc_pr.png",
-        "Rysunek 5. Porównanie modeli na zbiorze testowym (n = 624): krzywe ROC (lewo), krzywe Precision-Recall (środek) oraz zestawienie sześciu głównych metryk klasyfikacyjnych po kalibracji progu (prawo)."
+        "Rysunek 5. Porównanie modeli na zbiorze testowym (n = 624): krzywe ROC (lewo), krzywe Precision-Recall (środek) "
+        "oraz metryki przy progach z walidacji (prawo)."
     )
 
     add_figure_with_caption(
@@ -612,9 +718,9 @@ def build_report():
         doc,
         "Funkcjonalności aplikacji: ",
         "(1) wybór dowolnego zdjęcia RTG ze zbioru testowego (z filtrowaniem po podtypie NORMAL, BACTERIA, VIRUS) "
-        "lub wgranie własnego pliku obrazu w formacie JPEG/PNG; (2) dynamiczna regulacja progu decyzyjnego "
-        "klasyfikatora suwakiem w zakresie 0,10–0,90 (pozwalająca przełączać system pomiędzy trybem przesiewowym "
-        "o maksymalnej czułości a trybem o wysokiej swoistości); (3) natychmiastowe generowanie i nakładanie "
+        "lub wgranie własnego pliku obrazu w formacie JPEG/PNG; (2) skalibrowane prawdopodobieństwa Platta oraz "
+        "osobne, zamrożone progi walidacyjne dla każdego modelu (opcjonalne nadpisanie progu CNN w trybie eksperymentalnym); "
+        "(3) natychmiastowe generowanie i nakładanie "
         "mapy cieplnej Grad-CAM wskazującej lokalizację nacieku zapalnego; (4) równoległe zestawienie prawdopodobieństw "
         "P(PNEUMONIA) zwróconych przez wszystkie 4 wytrenowane modele (PneumoniaCNN, SVM, Random Forest, "
         "Logistic Regression) na wspólnym wykresie porównawczym oraz w tabeli diagnostycznej (Rysunek 10)."
@@ -638,10 +744,9 @@ def build_report():
         "w kierunku zapalenia płuc na zbiorze Chest X-Ray / PneumoniaMNIST (n = 5 856). Wykazano, że zarówno "
         "odpowiednio zaprojektowane klasyczne potoki uczenia maszynowego (oparte na redukcji wymiarowości PCA "
         "oraz ekstrakcji cech domenowych), jak i głębokie sieci konwolucyjne pozwalają na wysoce skuteczną "
-        "automatyzację diagnostyki. Najlepsze rezultaty uzyskała autorska sieć konwolucyjna PneumoniaCNN (PyTorch), "
-        "osiągając na zbiorze walidacyjnym dokładność 98,09% (ROC-AUC = 0,9980), natomiast na niezależnym zbiorze "
-        "testowym ROC-AUC = 0,9421, PR-AUC = 0,9596 oraz dokładność 88,14% (przy zbalansowanej czułości 88,21% "
-        "i swoistości 88,03%, a w trybie przesiewowym czułość 98,97%). Połączenie predykcji sieci z wizualizacją "
+        "automatyzację diagnostyki. Najlepsze wyniki uzyskała autorska sieć konwolucyjna PneumoniaCNN (PyTorch); "
+        "metryki liczbowe są generowane z `models/metrics_summary.json` i nie wykorzystują etykiet testowych "
+        "do strojenia progów. Połączenie predykcji sieci z wizualizacją "
         "Grad-CAM w aplikacji Streamlit wpisuje się bezpośrednio w potrzeby nowoczesnej praktyki klinicznej jako "
         "narzędzie tzw. szybkiego triażu radiologicznego (wskazujące zdjęcia wymagające pilnej konsultacji lekarskiej).",
         bold_prefix="Wnioski: "
@@ -649,6 +754,7 @@ def build_report():
 
     add_body_paragraph(
         doc,
+        "System ma charakter wyłącznie badawczo-edukacyjny i nie jest przeznaczony do zastosowań klinicznych. "
         "Głównym ograniczeniem analizowanego zbioru danych jest jego jednoośrodkowe pochodzenie (pediatryczni "
         "pacjenci w wieku 1–5 lat z jednego szpitala w Kantonie) oraz zauważalne przesunięcie rozkładu (domain shift) "
         "pomiędzy podzbiorem treningowym a testowym. Ponadto kompresja obrazów do rozdzielczości 64×64 lub 128×128 px "
@@ -678,18 +784,20 @@ def build_report():
         "Integralną część projektu stanowi repozytorium kodu źródłowego oraz wygenerowanych artefaktów znajdujące się "
         "w katalogu projektu UM/PROJEKT1:"
     )
-    add_bullet_point(doc, "PneumoniaMNIST_Analiza_i_Modelowanie.ipynb – ", "interaktywny notatnik Jupyter zawierający pełny kod eksploracji danych (EDA), inżynierii cech, redukcji wymiarowości PCA, trenowania modeli, ewaluacji oraz wizualizacji XAI / Grad-CAM.")
+    add_bullet_point(doc, "PneumoniaMNIST_Analiza_i_Modelowanie.ipynb – ", "interaktywny notatnik Jupyter zawierający wyniki EDA, inżynierii cech, redukcji wymiarowości PCA, trenowania modeli, ewaluacji oraz wizualizacji XAI / Grad-CAM.")
     add_bullet_point(doc, "run_pipeline.py – ", "kompletny skrypt potoku obliczeniowego pobierający zbiór przez kagglehub, trenujący modele i generujący wykresy (Rysunki 1–10) oraz plik podsumowania metryk models/metrics_summary.json.")
+    add_bullet_point(doc, "build_report.py / build_notebook.py – ", "generatory raportu DOCX oraz notatnika Jupyter zsynchronizowanych z models/metrics_summary.json.")
     add_bullet_point(doc, "app.py – ", "aplikacja webowa z interfejsem graficznym (Streamlit) do interaktywnej diagnostyki zdjęć RTG płuc (uruchamiana poleceniem: uv run streamlit run app.py).")
     add_bullet_point(doc, "Katalog figures/ – ", "zestaw 10 wykresów i wizualizacji w wysokiej rozdzielczości (fig1_class_distribution.png – fig10_ui_preview.png).")
     add_bullet_point(doc, "Katalog models/ – ", "zapisane wagi wytrenowanej sieci konwolucyjnej (cnn_pneumonia.pt), potoki modeli klasycznych (classical_models.joblib) oraz metadane zbioru (dataset_metadata.csv).")
 
-    out_path_1 = REPORT_PATH
-    out_path_2 = REPORT_AUTHORS_PATH
-    doc.save(str(out_path_1))
-    doc.save(str(out_path_2))
-    print(f"[SUCCESS] Saved DOCX reports to:\n  - {out_path_1}\n  - {out_path_2}")
+    REPORT_DIR = REPORT_PATH.parent
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
+    out_path_1 = REPORT_PATH.resolve()
+    doc.save(str(out_path_1))
+
+    print(f"[SUCCESS] Saved DOCX reports to:\n  - {out_path_1}")
 
 if __name__ == "__main__":
     build_report()

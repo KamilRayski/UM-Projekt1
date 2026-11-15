@@ -5,6 +5,7 @@ description = "Pneumonia detection from chest X-rays using classical ML and PyTo
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "ipykernel>=7.4.0",
     "joblib>=1.4.0",
     "kagglehub>=1.0.0",
     "matplotlib>=3.9.0",

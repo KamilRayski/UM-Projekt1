@@ -22,11 +22,30 @@ CLASSICAL_MODELS_PATH = MODELS_DIR / "classical_models.joblib"
 CNN_MODEL_PATH = MODELS_DIR / "cnn_pneumonia.pt"
 DATASET_METADATA_PATH = MODELS_DIR / "dataset_metadata.csv"
 METRICS_SUMMARY_PATH = MODELS_DIR / "metrics_summary.json"
+TEST_PREDICTIONS_PATH = MODELS_DIR / "test_predictions.csv"
 
-REPORT_TEMPLATE_PATH = PROJECT_DIR / "Raport Końcowy Przykład.docx"
-REPORT_PATH = PROJECT_DIR / "Raport_Koncowy_PneumoniaMNIST.docx"
-REPORT_AUTHORS_PATH = PROJECT_DIR / "Raport Końcowy - Kamil Rayski, Miłosz Pabis.docx"
-NOTEBOOK_PATH = PROJECT_DIR / "PneumoniaMNIST_Analiza_i_Modelowanie.ipynb"
+REPORT_DIR = PROJECT_DIR / "report"
+NOTEBOOK_PATH = PROJECT_DIR / "notebooks" / "PneumoniaMNIST_Analiza_i_Modelowanie.ipynb"
+README_PATH = PROJECT_DIR / "README.md"
+
+# Primary deliverables (project root — where submission copies are expected)
+REPORT_PATH = REPORT_DIR / "Raport Końcowy - Kamil Rayski, Miłosz Pabis.docx"
+
+_TEMPLATE_CANDIDATES = (
+    REPORT_DIR / "Raport Końcowy Przykład.docx",
+)
+
+
+def resolve_report_template() -> Path:
+    """Locate the DOCX template (report/ or legacy project root)."""
+    for candidate in _TEMPLATE_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    tried = ", ".join(str(p) for p in _TEMPLATE_CANDIDATES)
+    raise FileNotFoundError(
+        f"Brak szablonu raportu DOCX. Oczekiwany m.in.: {REPORT_DIR / 'Raport Końcowy Przykład.docx'}. "
+        f"Sprawdzone: {tried}"
+    )
 
 
 def ensure_runtime_dirs() -> None:

@@ -35,16 +35,19 @@ PROJEKT1/
 ├── PneumoniaMNIST_Analiza_i_Modelowanie.ipynb      # Notatnik Jupyter z kodem, tabelami i wykresami
 ├── download_data.py                                # Skrypt pobierający zbiór danych przez kagglehub
 ├── run_pipeline.py                                 # Główny potok: EDA, PCA, GridSearchCV, trening CNN i wykresy
-├── update_eval_and_ui_fig.py                       # Kalibracja progów decyzyjnych i generowanie podglądu GUI
-├── generate_report_docx.py                         # Skrypt budujący raport końcowy .docx na bazie szablonu
-├── build_notebook.py                               # Generator notatnika Jupyter (.ipynb) z wynikami
+├── update_eval_and_ui_fig.py                       # Regeneracja wykresów 5/6/9/10 (progi z walidacji, bez strojenia na teście)
+├── report_metrics.py                               # Wspólne tabele/metryki z metrics_summary.json
+├── build_report.py                                 # Raport .docx + aktualizacja tabeli w README
+├── build_notebook.py                               # Generator notatnika .ipynb z bieżących wyników
+├── generate_report_docx.py                         # Silnik raportu DOCX (wywoływany przez build_report.py)
 ├── app.py                                          # Interaktywna aplikacja diagnostyczna Streamlit (GUI)
 ├── data/                                           # Pobrany zbiór Chest X-Ray Pneumonia (kagglehub cache)
 ├── models/
 │   ├── classical_models.joblib                     # Wytrenowane potoki: StandardScaler, PCA, LR, RF, SVM
 │   ├── cnn_pneumonia.pt                            # Wagi wytrenowanej sieci PneumoniaCNN (PyTorch)
 │   ├── dataset_metadata.csv                        # Metadane i statystyki wszystkich 5 856 zdjęć RTG
-│   └── metrics_summary.json                        # Zestawienie metryk, najlepszych hiperparametrów i progów
+│   ├── metrics_summary.json                        # Metryki, progi walidacyjne, bootstrap i porównania par
+│   └── test_predictions.csv                        # Per-obraz predykcje (surowe + Platt) na zbiorze testowym
 └── figures/
     ├── fig1_class_distribution.png                 # Rozkład klas (oryginalny vs PneumoniaMNIST vs podtypy)
     ├── fig2_sample_xray_grid.png                   # Przykładowe zdjęcia RTG (NORMAL, BACTERIA, VIRUS)
@@ -81,11 +84,11 @@ uv run python run_pipeline.py
 uv run python update_eval_and_ui_fig.py
 ```
 
-### Krok 4: Wygenerowanie wypełnionego raportu końcowego `.docx` oraz notatnika `.ipynb`
+### Krok 4: Wygenerowanie raportu `.docx`, notatnika `.ipynb` i tabeli w README
 ```bash
-uv run python generate_report_docx.py
-uv run python build_notebook.py
+uv run python build_report.py
 ```
+*(Tworzy m.in. `Raport_Koncowy_PneumoniaMNIST.docx` i `Raport Końcowy - Kamil Rayski, Miłosz Pabis.docx` w **katalogu głównym** projektu oraz kopie w `report/`.)*
 
 ### Krok 5: Uruchomienie interaktywnej aplikacji diagnostycznej (Streamlit GUI)
 ```bash
@@ -97,15 +100,20 @@ Po uruchomieniu aplikacja jest dostępna w przeglądarce pod adresem **http://lo
 
 ## 4. Podsumowanie wyników modeli
 
+<!-- METRICS_TABLE_START -->
 | Model | Zbiór / Tryb | Accuracy | Balanced Acc | Precision | Recall (Czułość) | Specificity (Swoistość) | F1-score | ROC-AUC | PR-AUC |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Logistic Regression (PCA)** | Walidacyjny ($n=524$) | 95,42% | 94,74% | 97,65% | 96,14% | 93,33% | 96,89% | 0,9892 | 0,9959 |
-| **Random Forest** | Walidacyjny ($n=524$) | 96,18% | 93,80% | 96,24% | 98,71% | 88,89% | 97,46% | 0,9901 | 0,9961 |
-| **SVM (RBF + PCA)** | Walidacyjny ($n=524$) | 97,33% | 96,51% | 98,20% | 98,20% | 94,81% | 98,20% | 0,9955 | 0,9984 |
-| **PneumoniaCNN (PyTorch)** | Walidacyjny ($n=524$) | **98,09%** | **97,99%** | **99,22%** | **98,20%** | **97,78%** | **98,71%** | **0,9980** | **0,9993** |
-| **Logistic Regression (PCA)** | Testowy ($n=624$, kalibrowany) | 81,41% | 80,60% | 86,05% | 83,85% | 77,35% | 84,94% | 0,8869 | 0,9261 |
-| **SVM (RBF + PCA)** | Testowy ($n=624$, kalibrowany) | 82,69% | 82,74% | 88,95% | 82,56% | 82,91% | 85,64% | 0,9039 | 0,9327 |
-| **Random Forest** | Testowy ($n=624$, kalibrowany) | **88,14%** | 86,75% | 89,11% | 92,31% | 81,20% | **90,68%** | 0,9349 | 0,9589 |
-| **PneumoniaCNN (PyTorch)** | Testowy ($n=624$, próg `0.50` przesiewowy) | 83,01% | 77,69% | 79,10% | **98,97%** | 56,41% | 87,93% | **0,9421** | **0,9596** |
-| **PneumoniaCNN (PyTorch)** | Testowy ($n=624$, kalibrowany) | **88,14%** | **88,12%** | **92,47%** | 88,21% | **88,03%** | 90,29% | **0,9421** | **0,9596** |
+| **Logistic Regression (PCA)** | Walidacyjny (n=524) | 95,23% | 94,61% | 97,64% | 95,89% | 93,33% | 96,76% | 0,9910 | 0,9968 |
+| **Logistic Regression (PCA)** | Testowy (próg 0,50) | 74,84% | 67,05% | 71,86% | 98,21% | 35,90% | 82,99% | 0,8996 | 0,9349 |
+| **Logistic Regression (PCA)** | Testowy (próg z walidacji, Youden) | 73,08% | 64,53% | 70,26% | 98,72% | 30,34% | 82,09% | 0,8996 | 0,9349 |
+| **Random Forest** | Walidacyjny (n=524) | 95,04% | 91,34% | 94,59% | 98,97% | 83,70% | 96,73% | 0,9889 | 0,9959 |
+| **Random Forest** | Testowy (próg 0,50) | 77,24% | 69,83% | 73,48% | 99,49% | 40,17% | 84,53% | 0,9355 | 0,9576 |
+| **Random Forest** | Testowy (próg z walidacji, Youden) | 84,13% | 79,70% | 81,02% | 97,44% | 61,97% | 88,47% | 0,9355 | 0,9576 |
+| **SVM (RBF + PCA)** | Walidacyjny (n=524) | 98,09% | 96,78% | 97,97% | 99,49% | 94,07% | 98,72% | 0,9961 | 0,9986 |
+| **SVM (RBF + PCA)** | Testowy (próg 0,50) | 76,60% | 69,15% | 73,11% | 98,97% | 39,32% | 84,10% | 0,9050 | 0,9334 |
+| **SVM (RBF + PCA)** | Testowy (próg z walidacji, Youden) | 78,37% | 71,50% | 74,66% | 98,97% | 44,02% | 85,12% | 0,9050 | 0,9334 |
+| **PneumoniaCNN (PyTorch)** | Walidacyjny (n=524) | 98,09% | 97,75% | 98,97% | 98,46% | 97,04% | 98,71% | 0,9977 | 0,9992 |
+| **PneumoniaCNN (PyTorch)** | Testowy (próg 0,50) | 85,58% | 81,20% | 81,91% | 98,72% | 63,68% | 89,53% | 0,9494 | 0,9610 |
+| **PneumoniaCNN (PyTorch)** | Testowy (próg z walidacji, Youden) | 85,58% | 81,28% | 82,05% | 98,46% | 64,10% | 89,51% | 0,9494 | 0,9610 |
+<!-- METRICS_TABLE_END -->
 
