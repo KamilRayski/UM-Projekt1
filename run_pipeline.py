@@ -1,12 +1,28 @@
 import os
-import sys
 import json
 import time
 import random
+import re
 from pathlib import Path
 
-os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib_cache"
-os.environ["KAGGLEHUB_CACHE"] = "/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1/data"
+from config import (
+    CLASSICAL_MODELS_PATH,
+    CNN_MODEL_PATH,
+    DATA_DIR,
+    DATASET_METADATA_PATH,
+    FIGURES_DIR,
+    KAGGLE_DATASET_CACHE_DIR,
+    KAGGLE_DATASET_ID,
+    MATPLOTLIB_CACHE_DIR,
+    METRICS_SUMMARY_PATH,
+    PROJECT_DIR,
+    TEST_PREDICTIONS_PATH,
+    ensure_runtime_dirs,
+)
+
+ensure_runtime_dirs()
+os.environ["MPLCONFIGDIR"] = str(MATPLOTLIB_CACHE_DIR)
+os.environ["KAGGLEHUB_CACHE"] = str(DATA_DIR)
 
 import numpy as np
 import pandas as pd
@@ -16,16 +32,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split
+from sklearn.model_selection import StratifiedGroupKFold, GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score, confusion_matrix,
-    roc_curve, precision_recall_curve, balanced_accuracy_score
+    roc_curve, precision_recall_curve, balanced_accuracy_score, brier_score_loss
 )
 import joblib
 
@@ -41,25 +59,19 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-PROJECT_DIR = Path("/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1")
-FIGURES_DIR = PROJECT_DIR / "figures"
-MODELS_DIR = PROJECT_DIR / "models"
-FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
 plt.rcParams["figure.dpi"] = 150
 plt.rcParams["savefig.dpi"] = 180
 plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "Helvetica"]
 sns.set_theme(style="whitegrid", palette="muted")
 
 
-def resolve_dataset_path() -> Path:
-    local_cached = PROJECT_DIR / "data/datasets/paultimothymooney/chest-xray-pneumonia/versions/2/chest_xray"
-    if local_cached.exists():
-        print(f"[INFO] Using cached dataset at: {local_cached}")
-        return local_cached
+def resolve_dataset_path():
+    cached_versions = sorted(KAGGLE_DATASET_CACHE_DIR.glob("versions/*/chest_xray"), reverse=True)
+    if cached_versions:
+        print(f"[INFO] Using cached dataset at: {cached_versions[0]}")
+        return cached_versions[0]
     import kagglehub
-    path = kagglehub.dataset_download("paultimothymooney/chest-xray-pneumonia")
+    path = kagglehub.dataset_download(KAGGLE_DATASET_ID)
     print("Path to dataset files:", path)
     return Path(path) / "chest_xray"
 
@@ -90,6 +102,253 @@ def scan_dataset(base_dir: Path) -> pd.DataFrame:
                     "subtype": subtype,
                 })
     return pd.DataFrame(records)
+
+
+def infer_study_group(filename: str) -> str:
+    """Return a conservative, stable patient/study group inferred from a filename.
+
+    The Kaggle source does not provide a separate patient identifier.  Its
+    pneumonia filenames contain a person number and etiology; normal studies
+    use an IM study identifier, sometimes with multiple views.  Keeping the
+    two normal filename series distinct avoids treating unrelated records as a
+    single patient while still preventing known multi-view studies from being
+    split across partitions.
+    """
+    name = Path(filename).stem.lower()
+    pneumonia_match = re.match(r"person(?P<person>\d+)_(?P<etiology>bacteria|virus)", name)
+    if pneumonia_match:
+        return f"pneumonia-{pneumonia_match['etiology']}-{pneumonia_match['person']}"
+
+    normal_match = re.match(r"(?P<series>normal2-)?im-(?P<study>\d+-\d+)(?:-\d+)?$", name)
+    if normal_match:
+        series = "normal2" if normal_match["series"] else "normal"
+        return f"{series}-{normal_match['study']}"
+
+    # Never silently group unrecognised files: each receives its own group.
+    return f"unparsed-{name}"
+
+
+def grouped_holdout_indices(
+    labels: np.ndarray,
+    groups: np.ndarray,
+    target_size: int,
+    random_state: int = SEED,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create the closest stratified, group-disjoint holdout to ``target_size``."""
+    n_splits = max(2, round(len(labels) / target_size))
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    candidates = list(splitter.split(np.zeros(len(labels)), labels, groups))
+    overall_distribution = np.bincount(labels, minlength=len(np.unique(labels))) / len(labels)
+
+    def score(candidate):
+        _, holdout_idx = candidate
+        distribution = np.bincount(labels[holdout_idx], minlength=len(overall_distribution)) / len(holdout_idx)
+        return abs(len(holdout_idx) - target_size) + len(labels) * np.abs(distribution - overall_distribution).sum()
+
+    train_idx, holdout_idx = min(candidates, key=score)
+    return train_idx, holdout_idx
+
+
+def assert_disjoint_groups(df: pd.DataFrame, split_col: str = "split") -> dict:
+    """Fail fast if any study_group appears in more than one data split."""
+    splits = ("train", "val", "test")
+    group_by_split = {
+        split: set(df.loc[df[split_col] == split, "study_group"].unique()) for split in splits
+    }
+    audit = {"group_counts": {s: len(group_by_split[s]) for s in splits}, "overlaps": {}}
+    for i, left in enumerate(splits):
+        for right in splits[i + 1 :]:
+            shared = group_by_split[left] & group_by_split[right]
+            audit["overlaps"][f"{left}_vs_{right}"] = {
+                "n_shared_groups": len(shared),
+                "n_shared_images": int(df["study_group"].isin(shared).sum()) if shared else 0,
+            }
+            if shared:
+                sample = sorted(shared)[:5]
+                raise ValueError(
+                    f"Patient/study leakage between {left} and {right}: "
+                    f"{len(shared)} shared groups (e.g. {sample})"
+                )
+    print(
+        "[INFO] Group-disjoint split audit:",
+        {k: v for k, v in audit["group_counts"].items()},
+        "| overlaps:",
+        audit["overlaps"],
+    )
+    return audit
+
+
+def youden_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    fpr, tpr, thresh = roc_curve(y_true, y_prob)
+    return float(thresh[int(np.argmax(tpr - fpr))])
+
+
+def _safe_roc_auc(y_true, y_score):
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    return float(roc_auc_score(y_true, y_score))
+
+
+def bootstrap_roc_auc_ci(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    n_bootstrap: int = 1000,
+    random_state: int = SEED,
+) -> dict:
+    rng = np.random.default_rng(random_state)
+    y_true = np.asarray(y_true)
+    y_score = np.asarray(y_score)
+    n = len(y_true)
+    samples = []
+    for _ in range(n_bootstrap):
+        idx = rng.integers(0, n, size=n)
+        auc = _safe_roc_auc(y_true[idx], y_score[idx])
+        if not np.isnan(auc):
+            samples.append(auc)
+    point = _safe_roc_auc(y_true, y_score)
+    if not samples:
+        return {"point": point, "ci_low": None, "ci_high": None, "n_bootstrap": 0}
+    arr = np.asarray(samples, dtype=float)
+    return {
+        "point": point,
+        "ci_low": float(np.percentile(arr, 2.5)),
+        "ci_high": float(np.percentile(arr, 97.5)),
+        "n_bootstrap": len(samples),
+    }
+
+
+def bootstrap_paired_auc_comparison(
+    y_true: np.ndarray,
+    prob_a: np.ndarray,
+    prob_b: np.ndarray,
+    label_a: str,
+    label_b: str,
+    n_bootstrap: int = 1000,
+    random_state: int = SEED,
+) -> dict:
+    rng = np.random.default_rng(random_state)
+    y_true = np.asarray(y_true)
+    prob_a = np.asarray(prob_a)
+    prob_b = np.asarray(prob_b)
+    n = len(y_true)
+    diffs = []
+    wins_a = 0
+    valid = 0
+    for _ in range(n_bootstrap):
+        idx = rng.integers(0, n, size=n)
+        auc_a = _safe_roc_auc(y_true[idx], prob_a[idx])
+        auc_b = _safe_roc_auc(y_true[idx], prob_b[idx])
+        if np.isnan(auc_a) or np.isnan(auc_b):
+            continue
+        valid += 1
+        diffs.append(auc_a - auc_b)
+        if auc_a > auc_b:
+            wins_a += 1
+    point_a = _safe_roc_auc(y_true, prob_a)
+    point_b = _safe_roc_auc(y_true, prob_b)
+    if not diffs:
+        return {
+            "model_a": label_a,
+            "model_b": label_b,
+            "auc_a": point_a,
+            "auc_b": point_b,
+            "mean_auc_diff": point_a - point_b,
+            "p_a_greater_b": None,
+            "ci_diff_low": None,
+            "ci_diff_high": None,
+            "n_bootstrap": 0,
+        }
+    arr = np.asarray(diffs, dtype=float)
+    return {
+        "model_a": label_a,
+        "model_b": label_b,
+        "auc_a": point_a,
+        "auc_b": point_b,
+        "mean_auc_diff": float(arr.mean()),
+        "p_a_greater_b": float(wins_a / valid),
+        "ci_diff_low": float(np.percentile(arr, 2.5)),
+        "ci_diff_high": float(np.percentile(arr, 97.5)),
+        "n_bootstrap": valid,
+    }
+
+
+PCA_COMPONENTS = 100
+
+
+class EngineeredFeaturesTransformer(TransformerMixin, BaseEstimator):
+    """Picklable engineering step for sklearn pipelines (64×64 flattened pixels)."""
+
+    def __init__(self, ml_size: int = 64):
+        self.ml_size = ml_size
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return extract_engineered_features(np.asarray(X, dtype=np.float32), ml_size=self.ml_size)
+
+
+def build_lr_svm_pipeline(estimator) -> Pipeline:
+    return Pipeline(
+        [
+            (
+                "features",
+                FeatureUnion(
+                    [
+                        (
+                            "pca_branch",
+                            Pipeline(
+                                [
+                                    ("scaler", StandardScaler()),
+                                    ("pca", PCA(n_components=PCA_COMPONENTS, random_state=SEED)),
+                                ]
+                            ),
+                        ),
+                        (
+                            "eng",
+                            Pipeline(
+                                [
+                                    ("eng", EngineeredFeaturesTransformer()),
+                                    ("scaler", StandardScaler()),
+                                ]
+                            ),
+                        ),
+                    ]
+                ),
+            ),
+            ("clf", estimator),
+        ]
+    )
+
+
+def build_rf_pipeline(estimator) -> Pipeline:
+    return Pipeline(
+        [
+            (
+                "features",
+                FeatureUnion(
+                    [
+                        ("raw_pixels", "passthrough"),
+                        (
+                            "eng",
+                            Pipeline(
+                                [
+                                    ("eng", EngineeredFeaturesTransformer()),
+                                    ("scaler", StandardScaler()),
+                                ]
+                            ),
+                        ),
+                    ]
+                ),
+            ),
+            ("clf", estimator),
+        ]
+    )
+
+
+def extract_pca_from_pipeline(pipeline: Pipeline) -> tuple[StandardScaler, PCA]:
+    pca_branch = pipeline.named_steps["features"].transformer_list[0][1]
+    return pca_branch.named_steps["scaler"], pca_branch.named_steps["pca"]
 
 
 def compute_image_stats_and_features(df: pd.DataFrame, ml_size: int = 64):
@@ -280,6 +539,75 @@ def extract_engineered_features(flat_images: np.ndarray, ml_size: int = 64) -> n
     return np.array(feats, dtype=np.float32)
 
 
+def engineered_feature_transformer(flat_images: np.ndarray) -> np.ndarray:
+    """sklearn-compatible, picklable transformation for 64×64 raw pixels."""
+    return extract_engineered_features(flat_images, ml_size=64)
+
+
+class PlattCalibrator:
+    """Train-only Platt scaling for a model's positive-class scores."""
+
+    def __init__(self):
+        self.model = LogisticRegression(C=1_000_000.0, max_iter=1_000, random_state=SEED)
+
+    @staticmethod
+    def _logit(probabilities: np.ndarray) -> np.ndarray:
+        clipped = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
+        return np.log(clipped / (1 - clipped)).reshape(-1, 1)
+
+    def fit(self, probabilities: np.ndarray, labels: np.ndarray):
+        self.model.fit(self._logit(probabilities), labels)
+        return self
+
+    def predict_proba(self, probabilities: np.ndarray) -> np.ndarray:
+        return self.model.predict_proba(self._logit(probabilities))[:, 1]
+
+
+def register_pickle_main_aliases() -> None:
+    """Expose pipeline symbols on ``__main__`` for joblib pickles saved via ``python run_pipeline.py``."""
+    import sys
+
+    import run_pipeline as pipeline_mod
+
+    main = sys.modules["__main__"]
+    for name in (
+        "engineered_feature_transformer",
+        "EngineeredFeaturesTransformer",
+        "PlattCalibrator",
+    ):
+        if hasattr(pipeline_mod, name):
+            setattr(main, name, getattr(pipeline_mod, name))
+
+
+def load_classical_bundle(path: Path | str):
+    register_pickle_main_aliases()
+    return joblib.load(path)
+
+
+def predict_classical_probabilities(classical_bundle: dict, raw_pixels: np.ndarray) -> dict[str, np.ndarray]:
+    """Predict with both the corrected pipeline bundle and the legacy bundle."""
+    register_pickle_main_aliases()
+    if "classical_models" in classical_bundle:
+        return {
+            name: model.predict_proba(raw_pixels)[:, 1]
+            for name, model in classical_bundle["classical_models"].items()
+        }
+
+    # Compatibility with artifacts generated before the grouped-CV migration.
+    ml_size = classical_bundle["ml_size"]
+    engineered = extract_engineered_features(raw_pixels, ml_size=ml_size)
+    full_features = np.hstack([
+        classical_bundle["pca"].transform(classical_bundle["pixel_scaler"].transform(raw_pixels)),
+        classical_bundle["eng_scaler"].transform(engineered),
+    ])
+    rf_features = np.hstack([raw_pixels, classical_bundle["eng_scaler"].transform(engineered)])
+    return {
+        "Logistic Regression": classical_bundle["lr"].predict_proba(full_features)[:, 1],
+        "Random Forest": classical_bundle["rf"].predict_proba(rf_features)[:, 1],
+        "SVM (RBF)": classical_bundle["svm"].predict_proba(full_features)[:, 1],
+    }
+
+
 class ChestXRayCNNDataset(Dataset):
     def __init__(self, filepaths, labels, img_size=128, is_train=False):
         self.filepaths = list(filepaths)
@@ -402,32 +730,33 @@ def main():
     base_dir = resolve_dataset_path()
     df = scan_dataset(base_dir)
     print(f"[INFO] Scanned {len(df)} total images.")
+    df["study_group"] = df["filename"].map(infer_study_group)
 
-    # Re-split train+val into stratified 90% train (4708) and 10% val (524), matching PneumoniaMNIST standard
-    # while keeping the official test set (624 images) untouched.
+    # Group-disjoint holdout: ~524 validation images from original train+val; official test untouched.
     train_val_mask = df["orig_split"].isin(["train", "val"])
-    df_train_val = df[train_val_mask].copy()
-    df_test = df[df["orig_split"] == "test"].copy()
+    df_tv = df[train_val_mask].copy()
+    tv_labels = df_tv["label"].to_numpy()
+    tv_groups = df_tv["study_group"].to_numpy()
+    tv_train_pos, tv_val_pos = grouped_holdout_indices(tv_labels, tv_groups, target_size=524, random_state=SEED)
 
-    train_idx, val_idx = train_test_split(
-        df_train_val.index,
-        test_size=524,
-        random_state=SEED,
-        stratify=df_train_val["subtype"]
-    )
-    df["split"] = "test"
-    df.loc[train_idx, "split"] = "train"
-    df.loc[val_idx, "split"] = "val"
+    df["split"] = np.where(df["orig_split"] == "test", "test", "train")
+    val_global_idx = df_tv.index[tv_val_pos]
+    df.loc[val_global_idx, "split"] = "val"
 
-    print("[INFO] Split counts after stratified validation correction:")
+    leakage_audit = assert_disjoint_groups(df)
+    print("[INFO] Split counts after group-disjoint validation correction:")
     print(df.groupby(["split", "label_name"]).size())
 
     ml_size = 64
     df, flat_images = compute_image_stats_and_features(df, ml_size=ml_size)
     generate_eda_figures(df, flat_images, ml_size=ml_size)
 
-    # Save metadata CSV
-    df.to_csv(MODELS_DIR / "dataset_metadata.csv", index=False)
+    # Persist portable paths while retaining full paths for this pipeline run.
+    metadata_df = df.copy()
+    metadata_df["filepath"] = metadata_df["filepath"].map(
+        lambda path: os.path.relpath(path, PROJECT_DIR)
+    )
+    metadata_df.to_csv(DATASET_METADATA_PATH, index=False)
 
     # Prepare train/val/test arrays for classical ML
     eng_features = extract_engineered_features(flat_images, ml_size=ml_size)
@@ -439,32 +768,17 @@ def main():
     X_raw_train, y_train = flat_images[idx_train], df["label"].values[idx_train]
     X_raw_val, y_val = flat_images[idx_val], df["label"].values[idx_val]
     X_raw_test, y_test = flat_images[idx_test], df["label"].values[idx_test]
+    groups_train = df.iloc[idx_train]["study_group"].to_numpy()
 
-    # Standardization + PCA on raw pixels
-    print("[INFO] Running StandardScaler + PCA on 64x64 pixel features...")
+    # PCA summary for EDA (train-only fit; mirrors the LR/SVM pipeline branch).
+    print("[INFO] Fitting train-only StandardScaler + PCA for EDA figures...")
     pixel_scaler = StandardScaler()
     X_scaled_train = pixel_scaler.fit_transform(X_raw_train)
-    X_scaled_val = pixel_scaler.transform(X_raw_val)
-    X_scaled_test = pixel_scaler.transform(X_raw_test)
-
-    n_components = 100
+    n_components = PCA_COMPONENTS
     pca = PCA(n_components=n_components, random_state=SEED)
     X_pca_train = pca.fit_transform(X_scaled_train)
-    X_pca_val = pca.transform(X_scaled_val)
-    X_pca_test = pca.transform(X_scaled_test)
-
     cum_var = np.cumsum(pca.explained_variance_ratio_)
     print(f"[INFO] PCA with {n_components} components explains {cum_var[-1]*100:.2f}% variance.")
-
-    # Combine PCA features with scaled engineered features
-    eng_scaler = StandardScaler()
-    X_eng_train = eng_scaler.fit_transform(eng_features[idx_train])
-    X_eng_val = eng_scaler.transform(eng_features[idx_val])
-    X_eng_test = eng_scaler.transform(eng_features[idx_test])
-
-    X_train_full = np.hstack([X_pca_train, X_eng_train])
-    X_val_full = np.hstack([X_pca_val, X_eng_val])
-    X_test_full = np.hstack([X_pca_test, X_eng_test])
 
     # Generate Fig 4: PCA Variance, 2D Projection & Eigenlungs
     fig = plt.figure(figsize=(15, 4.8))
@@ -505,86 +819,88 @@ def main():
     plt.close(fig)
 
     # ---------------------------------------------------------
-    # Classical ML Models + GridSearchCV
+    # Classical ML Models + grouped GridSearchCV (preprocessing inside pipelines)
     # ---------------------------------------------------------
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+    cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=SEED)
     results_summary = {}
-    val_probs = {}
-    test_probs = {}
+    val_probs_raw = {}
+    test_probs_raw = {}
+    val_probs_platt = {}
+    test_probs_platt = {}
+    platt_calibrators: dict[str, PlattCalibrator] = {}
+    val_thresholds: dict[str, float] = {}
+    val_thresholds_platt: dict[str, float] = {}
     best_params_summary = {}
 
-    # 1. Logistic Regression
-    print("[INFO] Tuning Logistic Regression via GridSearchCV...")
+    print("[INFO] Tuning Logistic Regression via grouped GridSearchCV...")
     lr_grid = GridSearchCV(
-        LogisticRegression(max_iter=1000, random_state=SEED),
-        param_grid={"C": [0.01, 0.1, 1.0, 10.0], "class_weight": [None, "balanced"]},
-        cv=cv, scoring="roc_auc", n_jobs=-1
+        build_lr_svm_pipeline(LogisticRegression(max_iter=1000, random_state=SEED)),
+        param_grid={"clf__C": [0.01, 0.1, 1.0, 10.0], "clf__class_weight": [None, "balanced"]},
+        cv=cv,
+        scoring="roc_auc",
+        n_jobs=-1,
     )
-    lr_grid.fit(X_train_full, y_train)
+    lr_grid.fit(X_raw_train, y_train, groups=groups_train)
     best_lr = lr_grid.best_estimator_
     best_params_summary["Logistic Regression"] = {
-        "best_params": lr_grid.best_params_,
-        "cv_roc_auc": float(lr_grid.best_score_)
+        "best_params": {k.replace("clf__", ""): v for k, v in lr_grid.best_params_.items()},
+        "cv_roc_auc": float(lr_grid.best_score_),
     }
-    val_probs["Logistic Regression"] = best_lr.predict_proba(X_val_full)[:, 1]
-    test_probs["Logistic Regression"] = best_lr.predict_proba(X_test_full)[:, 1]
-    print(f"  -> Best LR: {lr_grid.best_params_}, CV AUC={lr_grid.best_score_:.4f}")
+    val_probs_raw["Logistic Regression"] = best_lr.predict_proba(X_raw_val)[:, 1]
+    test_probs_raw["Logistic Regression"] = best_lr.predict_proba(X_raw_test)[:, 1]
+    print(f"  -> Best LR: {best_params_summary['Logistic Regression']['best_params']}, CV AUC={lr_grid.best_score_:.4f}")
 
-    # 2. Random Forest (trained on raw 64x64 pixels + engineered features so we also get direct 2D pixel importance!)
-    print("[INFO] Tuning Random Forest via GridSearchCV...")
-    X_rf_train = np.hstack([X_raw_train, X_eng_train])
-    X_rf_val = np.hstack([X_raw_val, X_eng_val])
-    X_rf_test = np.hstack([X_raw_test, X_eng_test])
+    print("[INFO] Tuning Random Forest via grouped GridSearchCV...")
     rf_grid = GridSearchCV(
-        RandomForestClassifier(random_state=SEED, n_jobs=-1),
+        build_rf_pipeline(RandomForestClassifier(random_state=SEED, n_jobs=-1)),
         param_grid={
-            "n_estimators": [150, 300],
-            "max_depth": [12, 24, None],
-            "class_weight": ["balanced", "balanced_subsample"]
+            "clf__n_estimators": [150, 300],
+            "clf__max_depth": [12, 24, None],
+            "clf__class_weight": ["balanced", "balanced_subsample"],
         },
-        cv=cv, scoring="roc_auc", n_jobs=-1
+        cv=cv,
+        scoring="roc_auc",
+        n_jobs=-1,
     )
-    rf_grid.fit(X_rf_train, y_train)
+    rf_grid.fit(X_raw_train, y_train, groups=groups_train)
     best_rf = rf_grid.best_estimator_
     best_params_summary["Random Forest"] = {
-        "best_params": rf_grid.best_params_,
-        "cv_roc_auc": float(rf_grid.best_score_)
+        "best_params": {k.replace("clf__", ""): v for k, v in rf_grid.best_params_.items()},
+        "cv_roc_auc": float(rf_grid.best_score_),
     }
-    val_probs["Random Forest"] = best_rf.predict_proba(X_rf_val)[:, 1]
-    test_probs["Random Forest"] = best_rf.predict_proba(X_rf_test)[:, 1]
-    print(f"  -> Best RF: {rf_grid.best_params_}, CV AUC={rf_grid.best_score_:.4f}")
+    val_probs_raw["Random Forest"] = best_rf.predict_proba(X_raw_val)[:, 1]
+    test_probs_raw["Random Forest"] = best_rf.predict_proba(X_raw_test)[:, 1]
+    print(f"  -> Best RF: {best_params_summary['Random Forest']['best_params']}, CV AUC={rf_grid.best_score_:.4f}")
 
-    # 3. SVM (RBF)
-    print("[INFO] Tuning SVM (RBF) via GridSearchCV...")
+    print("[INFO] Tuning SVM (RBF) via grouped GridSearchCV...")
     svm_grid = GridSearchCV(
-        SVC(kernel="rbf", probability=True, random_state=SEED),
+        build_lr_svm_pipeline(SVC(kernel="rbf", probability=True, random_state=SEED)),
         param_grid={
-            "C": [0.5, 1.0, 5.0, 10.0],
-            "gamma": ["scale", 0.001, 0.0005],
-            "class_weight": [None, "balanced"]
+            "clf__C": [0.5, 1.0, 5.0, 10.0],
+            "clf__gamma": ["scale", 0.001, 0.0005],
+            "clf__class_weight": [None, "balanced"],
         },
-        cv=cv, scoring="roc_auc", n_jobs=-1
+        cv=cv,
+        scoring="roc_auc",
+        n_jobs=-1,
     )
-    svm_grid.fit(X_train_full, y_train)
+    svm_grid.fit(X_raw_train, y_train, groups=groups_train)
     best_svm = svm_grid.best_estimator_
     best_params_summary["SVM (RBF)"] = {
-        "best_params": svm_grid.best_params_,
-        "cv_roc_auc": float(svm_grid.best_score_)
+        "best_params": {k.replace("clf__", ""): v for k, v in svm_grid.best_params_.items()},
+        "cv_roc_auc": float(svm_grid.best_score_),
     }
-    val_probs["SVM (RBF)"] = best_svm.predict_proba(X_val_full)[:, 1]
-    test_probs["SVM (RBF)"] = best_svm.predict_proba(X_test_full)[:, 1]
-    print(f"  -> Best SVM: {svm_grid.best_params_}, CV AUC={svm_grid.best_score_:.4f}")
+    val_probs_raw["SVM (RBF)"] = best_svm.predict_proba(X_raw_val)[:, 1]
+    test_probs_raw["SVM (RBF)"] = best_svm.predict_proba(X_raw_test)[:, 1]
+    print(f"  -> Best SVM: {best_params_summary['SVM (RBF)']['best_params']}, CV AUC={svm_grid.best_score_:.4f}")
 
-    # Save classical pipeline artifacts
-    joblib.dump({
-        "pixel_scaler": pixel_scaler,
-        "pca": pca,
-        "eng_scaler": eng_scaler,
-        "lr": best_lr,
-        "rf": best_rf,
-        "svm": best_svm,
-        "ml_size": ml_size
-    }, MODELS_DIR / "classical_models.joblib")
+    for m_name in ["Logistic Regression", "Random Forest", "SVM (RBF)"]:
+        cal = PlattCalibrator().fit(val_probs_raw[m_name], y_val)
+        platt_calibrators[m_name] = cal
+        val_probs_platt[m_name] = cal.predict_proba(val_probs_raw[m_name])
+        test_probs_platt[m_name] = cal.predict_proba(test_probs_raw[m_name])
+        val_thresholds[m_name] = youden_optimal_threshold(y_val, val_probs_raw[m_name])
+        val_thresholds_platt[m_name] = youden_optimal_threshold(y_val, val_probs_platt[m_name])
 
     # ---------------------------------------------------------
     # 4. PyTorch Convolutional Neural Network (PneumoniaCNN)
@@ -672,7 +988,7 @@ def main():
         "img_size": img_size_cnn,
         "history": history,
         "best_val_auc": best_val_auc
-    }, MODELS_DIR / "cnn_pneumonia.pt")
+    }, CNN_MODEL_PATH)
 
     # Get CNN validation & test probabilities
     model.eval()
@@ -686,32 +1002,127 @@ def main():
                 probs_all.append(probs.cpu().numpy())
         return np.concatenate(probs_all)
 
-    val_probs["PneumoniaCNN (PyTorch)"] = predict_cnn_loader(val_loader)
-    test_probs["PneumoniaCNN (PyTorch)"] = predict_cnn_loader(test_loader)
+    val_probs_raw["PneumoniaCNN (PyTorch)"] = predict_cnn_loader(val_loader)
+    test_probs_raw["PneumoniaCNN (PyTorch)"] = predict_cnn_loader(test_loader)
     best_params_summary["PneumoniaCNN (PyTorch)"] = {
-        "best_params": {"img_size": "128x128", "optimizer": "AdamW (lr=1e-3, wd=1e-4)", "scheduler": "CosineAnnealingLR", "loss": "Weighted CrossEntropy", "epochs": epochs},
-        "cv_roc_auc": float(best_val_auc)
+        "best_params": {
+            "img_size": "128x128",
+            "optimizer": "AdamW (lr=1e-3, wd=1e-4)",
+            "scheduler": "CosineAnnealingLR",
+            "loss": "Weighted CrossEntropy",
+            "epochs": epochs,
+        },
+        "cv_roc_auc": float(best_val_auc),
+    }
+    cnn_platt = PlattCalibrator().fit(val_probs_raw["PneumoniaCNN (PyTorch)"], y_val)
+    platt_calibrators["PneumoniaCNN (PyTorch)"] = cnn_platt
+    val_probs_platt["PneumoniaCNN (PyTorch)"] = cnn_platt.predict_proba(val_probs_raw["PneumoniaCNN (PyTorch)"])
+    test_probs_platt["PneumoniaCNN (PyTorch)"] = cnn_platt.predict_proba(test_probs_raw["PneumoniaCNN (PyTorch)"])
+    val_thresholds["PneumoniaCNN (PyTorch)"] = youden_optimal_threshold(
+        y_val, val_probs_raw["PneumoniaCNN (PyTorch)"]
+    )
+    val_thresholds_platt["PneumoniaCNN (PyTorch)"] = youden_optimal_threshold(
+        y_val, val_probs_platt["PneumoniaCNN (PyTorch)"]
+    )
+
+    gui_threshold_keys = {
+        "Logistic Regression": "Logistic Regression (PCA)",
+        "Random Forest": "Random Forest",
+        "SVM (RBF)": "SVM (RBF + PCA)",
+        "PneumoniaCNN (PyTorch)": "PneumoniaCNN (PyTorch)",
+    }
+    gui_val_thresholds_platt = {
+        gui_threshold_keys[k]: val_thresholds_platt[k] for k in val_thresholds_platt
     }
 
-    # Evaluate all models on Validation and Test sets (both default 0.5 threshold and Youden's J optimal threshold on val)
-    for m_name in ["Logistic Regression", "Random Forest", "SVM (RBF)", "PneumoniaCNN (PyTorch)"]:
-        vp = val_probs[m_name]
-        tp = test_probs[m_name]
-        # Default threshold 0.5
+    joblib.dump(
+        {
+            "classical_models": {
+                "Logistic Regression": best_lr,
+                "Random Forest": best_rf,
+                "SVM (RBF)": best_svm,
+            },
+            "platt_calibrators": platt_calibrators,
+            "val_thresholds_raw": val_thresholds,
+            "val_thresholds_platt": val_thresholds_platt,
+            "gui_model_thresholds_platt": gui_val_thresholds_platt,
+            "ml_size": ml_size,
+            "pca_explained_variance_100": float(cum_var[-1]),
+            # Train-only transforms for spatial explainability maps (not used at inference).
+            "eda_pixel_scaler": pixel_scaler,
+            "eda_pca": pca,
+        },
+        CLASSICAL_MODELS_PATH,
+    )
+
+    bootstrap_cis = {}
+    for m_name, tp in test_probs_raw.items():
+        bootstrap_cis[m_name] = bootstrap_roc_auc_ci(y_test, tp)
+
+    paired_comparisons = []
+    model_names = list(test_probs_raw.keys())
+    for i in range(len(model_names)):
+        for j in range(i + 1, len(model_names)):
+            paired_comparisons.append(
+                bootstrap_paired_auc_comparison(
+                    y_test,
+                    test_probs_raw[model_names[i]],
+                    test_probs_raw[model_names[j]],
+                    model_names[i],
+                    model_names[j],
+                )
+            )
+
+    test_meta = df.iloc[idx_test][
+        ["filename", "filepath", "label", "label_name", "subtype", "study_group"]
+    ].reset_index(drop=True)
+    predictions_frames = [test_meta.copy()]
+    for m_name, tp in test_probs_raw.items():
+        predictions_frames.append(pd.Series(tp, name=f"score_raw__{m_name}"))
+        predictions_frames.append(pd.Series(test_probs_platt[m_name], name=f"score_platt__{m_name}"))
+    test_predictions_df = pd.concat(predictions_frames, axis=1)
+    test_predictions_df.to_csv(TEST_PREDICTIONS_PATH, index=False)
+
+    # Evaluate all models: validation metrics, test@0.5, test@validation Youden threshold (never tuned on test).
+    for m_name in model_names:
+        vp = val_probs_raw[m_name]
+        tp = test_probs_raw[m_name]
+        vp_platt = val_probs_platt[m_name]
+        tp_platt = test_probs_platt[m_name]
         val_m = compute_metrics_dict(y_val, vp, threshold=0.5)
         test_m = compute_metrics_dict(y_test, tp, threshold=0.5)
-        # Also compute optimal threshold on validation maximizing Balanced Accuracy (Youden's J) for calibrated test deployment
-        fpr, tpr, thresh = roc_curve(y_val, vp)
-        j_scores = tpr - fpr
-        opt_t = float(thresh[np.argmax(j_scores)])
-        test_m_calibrated = compute_metrics_dict(y_test, tp, threshold=opt_t)
+        opt_t = val_thresholds[m_name]
+        test_m_val_threshold = compute_metrics_dict(y_test, tp, threshold=opt_t)
+        test_m_platt = compute_metrics_dict(y_test, tp_platt, threshold=val_thresholds_platt[m_name])
+        val_m_platt = compute_metrics_dict(y_val, vp_platt, threshold=val_thresholds_platt[m_name])
         results_summary[m_name] = {
             "val": val_m,
+            "val_platt": val_m_platt,
             "test_default": test_m,
-            "test_calibrated": test_m_calibrated,
-            "opt_threshold": opt_t
+            "test_val_threshold": test_m_val_threshold,
+            "test_platt_at_val_threshold": test_m_platt,
+            # Backward-compatible keys consumed by older report scripts.
+            "test_calibrated": test_m_val_threshold,
+            "opt_threshold": opt_t,
+            "val_threshold_platt": val_thresholds_platt[m_name],
+            "brier_score_test_raw": float(brier_score_loss(y_test, tp)),
+            "brier_score_test_platt": float(brier_score_loss(y_test, tp_platt)),
+            "bootstrap_roc_auc": bootstrap_cis[m_name],
         }
-        print(f"[RESULT] {m_name:24s} | Val AUC={val_m['roc_auc']:.4f} F1={val_m['f1']:.4f} | Test Acc={test_m['accuracy']:.4f} F1={test_m['f1']:.4f} AUC={test_m['roc_auc']:.4f} (Calib Acc={test_m_calibrated['accuracy']:.4f} Spec={test_m_calibrated['specificity']:.4f})")
+        ci = bootstrap_cis[m_name]
+        ci_txt = (
+            f"[{ci['ci_low']:.4f}, {ci['ci_high']:.4f}]"
+            if ci["ci_low"] is not None and ci["ci_high"] is not None
+            else "[n/a]"
+        )
+        print(
+            f"[RESULT] {m_name:24s} | Val AUC={val_m['roc_auc']:.4f} | "
+            f"Test AUC={test_m['roc_auc']:.4f} {ci_txt} | "
+            f"Test@val_thr Acc={test_m_val_threshold['accuracy']:.4f}"
+        )
+
+    test_probs = test_probs_raw
+    val_probs = val_probs_raw
 
     # ---------------------------------------------------------
     # Fig 5: Model Comparison (ROC curves, PR curves, Metrics Bar Chart)
@@ -750,12 +1161,21 @@ def main():
     width = 0.2
     for i, m_name in enumerate(test_probs.keys()):
         # Show calibrated test metrics for fair clinical comparison
-        vals = [results_summary[m_name]["test_calibrated"][k] for k in metric_keys]
+        vals = [results_summary[m_name]["test_val_threshold"][k] for k in metric_keys]
         axes[2].bar(x_pos + (i - 1.5) * width, vals, width, label=m_name, color=colors[m_name], edgecolor="black", linewidth=0.5)
     axes[2].set_xticks(x_pos)
     axes[2].set_xticklabels(metric_labels, rotation=20)
-    axes[2].set_ylim(0.6, 1.03)
-    axes[2].set_title("Porównanie metryk modeli (Zbiór testowy)", fontsize=11.5, fontweight="bold")
+    bar_floor = min(
+        results_summary[m]["test_val_threshold"][k]
+        for m in test_probs
+        for k in metric_keys
+    )
+    axes[2].set_ylim(max(0.0, bar_floor - 0.08), 1.03)
+    axes[2].set_title(
+        "Metryki na zbiorze testowym (próg z walidacji, bez strojenia na teście)",
+        fontsize=11.5,
+        fontweight="bold",
+    )
     axes[2].set_ylabel("Wartość metryki")
     axes[2].legend(fontsize=8.5, loc="lower right")
 
@@ -768,7 +1188,7 @@ def main():
     # ---------------------------------------------------------
     fig, axes = plt.subplots(1, 4, figsize=(16, 4.0))
     for idx_m, m_name in enumerate(test_probs.keys()):
-        m_info = results_summary[m_name]["test_calibrated"]
+        m_info = results_summary[m_name]["test_val_threshold"]
         cm = np.array([[m_info["tn"], m_info["fp"]], [m_info["fn"], m_info["tp"]]])
         sns.heatmap(
             cm, annot=True, fmt="d", cmap="Blues", cbar=False, ax=axes[idx_m],
@@ -810,7 +1230,7 @@ def main():
     # ---------------------------------------------------------
     # Fig 8: Explainability (Random Forest 2D Pixel Importance + Engineered Feature Importance + Grad-CAM for CNN)
     # ---------------------------------------------------------
-    rf_importances = best_rf.feature_importances_
+    rf_importances = best_rf.named_steps["clf"].feature_importances_
     pixel_imp_2d = rf_importances[:ml_size * ml_size].reshape(ml_size, ml_size)
     eng_imp = rf_importances[ml_size * ml_size:]
     eng_names = [
@@ -861,8 +1281,10 @@ def main():
 
     # Top-middle: Logistic Regression / SVM effective 2D weight map via PCA inverse transform
     ax_lr2d = fig.add_subplot(gs[0, 1])
-    lr_pca_weights = best_lr.coef_[0][:n_components]
-    lr_spatial_map = np.dot(lr_pca_weights, pca.components_).reshape(ml_size, ml_size)
+    _, pipeline_pca = extract_pca_from_pipeline(best_lr)
+    lr_clf = best_lr.named_steps["clf"]
+    lr_pca_weights = lr_clf.coef_[0][:n_components]
+    lr_spatial_map = np.dot(lr_pca_weights, pipeline_pca.components_).reshape(ml_size, ml_size)
     vmax_lr = np.percentile(np.abs(lr_spatial_map), 98)
     im_lr = ax_lr2d.imshow(lr_spatial_map, cmap="coolwarm", vmin=-vmax_lr, vmax=vmax_lr)
     ax_lr2d.set_title("Przestrzenna mapa wag (Regresja Logistyczna + PCA)\n[Czerwony = PNEUMONIA, Niebieski = NORMAL]", fontsize=10.5, fontweight="bold")
@@ -897,16 +1319,16 @@ def main():
     # ---------------------------------------------------------
     # Fig 9: Error Analysis (False Positives & False Negatives + Subtype Error Breakdown)
     # ---------------------------------------------------------
-    cnn_tp = test_probs["PneumoniaCNN (PyTorch)"]
-    cnn_opt_t = results_summary["PneumoniaCNN (PyTorch)"]["opt_threshold"]
-    cnn_preds = (cnn_tp >= cnn_opt_t).astype(int)
+    cnn_opt_t = results_summary["PneumoniaCNN (PyTorch)"]["val_threshold_platt"]
+    cnn_tp_platt = test_probs_platt["PneumoniaCNN (PyTorch)"]
+    cnn_preds = (cnn_tp_platt >= cnn_opt_t).astype(int)
 
     fp_indices = np.where((y_test == 0) & (cnn_preds == 1))[0]
     fn_indices = np.where((y_test == 1) & (cnn_preds == 0))[0]
 
     # Sort FPs by highest predicted probability, FNs by lowest predicted probability
-    fp_sorted = fp_indices[np.argsort(-cnn_tp[fp_indices])]
-    fn_sorted = fn_indices[np.argsort(cnn_tp[fn_indices])]
+    fp_sorted = fp_indices[np.argsort(-cnn_tp_platt[fp_indices])]
+    fn_sorted = fn_indices[np.argsort(cnn_tp_platt[fn_indices])]
 
     fig = plt.figure(figsize=(15.5, 4.8))
     gs = fig.add_gridspec(1, 5, width_ratios=[1, 1, 1, 1, 1.35])
@@ -916,7 +1338,12 @@ def main():
         if i < len(fp_sorted):
             ti = fp_sorted[i]
             ax_fp.imshow(test_ds.cached_imgs[ti], cmap="gray")
-            ax_fp.set_title(f"Błąd FP #{i+1} (Rzecz.: NORMAL)\nPred: PNEUMONIA ({cnn_tp[ti]*100:.1f}%)", fontsize=9.5, color="#c0392b", fontweight="bold")
+            ax_fp.set_title(
+                f"Błąd FP #{i+1} (Rzecz.: NORMAL)\nPred: PNEUMONIA ({cnn_tp_platt[ti]*100:.1f}%)",
+                fontsize=9.5,
+                color="#c0392b",
+                fontweight="bold",
+            )
         ax_fp.axis("off")
 
     for i in range(2):
@@ -925,7 +1352,12 @@ def main():
             ti = fn_sorted[i]
             sub = df.iloc[idx_test[ti]]["subtype"].replace("PNEUMONIA_", "")
             ax_fn.imshow(test_ds.cached_imgs[ti], cmap="gray")
-            ax_fn.set_title(f"Błąd FN #{i+1} (Rzecz.: {sub})\nPred: NORMAL (P={cnn_tp[ti]*100:.1f}%)", fontsize=9.5, color="#2b5c8f", fontweight="bold")
+            ax_fn.set_title(
+                f"Błąd FN #{i+1} (Rzecz.: {sub})\nPred: NORMAL (P={cnn_tp_platt[ti]*100:.1f}%)",
+                fontsize=9.5,
+                color="#2b5c8f",
+                fontweight="bold",
+            )
         ax_fn.axis("off")
 
     # Subtype recall comparison on test set (Normal vs Bacteria vs Virus)
@@ -944,8 +1376,12 @@ def main():
         edgecolor="black", width=0.58
     )
     ax_sub.set_ylim(0, 108)
-    ax_sub.set_ylabel("Skuteczność rozpoznania [%]")
-    ax_sub.set_title("Skuteczność CNN wg podtypu\nna zbiorze testowym", fontsize=10.5, fontweight="bold")
+    ax_sub.set_ylabel("Dokładność klasyfikacji [%]")
+    ax_sub.set_title(
+        "Dokładność CNN wg podtypu (próg z walidacji)\nna zbiorze testowym",
+        fontsize=10.5,
+        fontweight="bold",
+    )
     ax_sub.bar_label(bars, fmt="%.1f%%", fontsize=9.5, padding=2)
 
     plt.suptitle("Analiza błędów (Error Analysis): Przykłady FP i FN oraz skuteczność względem etiologii", fontsize=13, fontweight="bold", y=1.03)
@@ -969,16 +1405,28 @@ def main():
             "std_normal_mean": float(df[df["label"] == 0]["std_intensity"].mean()),
             "std_pneumonia_mean": float(df[df["label"] == 1]["std_intensity"].mean()),
         },
+        "leakage_audit": leakage_audit,
+        "val_thresholds_raw": val_thresholds,
+        "val_thresholds_platt": val_thresholds_platt,
+        "gui_model_thresholds_platt": gui_val_thresholds_platt,
         "pca_explained_variance_100": float(cum_var[-1]),
         "best_params_summary": best_params_summary,
         "results_summary": results_summary,
-        "subtype_test_accuracy_cnn": {x[0].replace("\n", " "): {"accuracy_pct": float(x[1]), "count": x[2]} for x in sub_acc_data},
-        "elapsed_seconds": float(time.time() - t0)
+        "bootstrap_paired_auc_comparisons_test": paired_comparisons,
+        "test_predictions_path": str(TEST_PREDICTIONS_PATH.relative_to(PROJECT_DIR)),
+        "subtype_test_accuracy_cnn": {
+            x[0].replace("\n", " "): {"accuracy_pct": float(x[1]), "count": x[2]} for x in sub_acc_data
+        },
+        "evaluation_notes": {
+            "threshold_selection": "Validation Youden J only; test labels never used for threshold tuning.",
+            "probability_display": "GUI/report Platt scaling fit on validation split.",
+        },
+        "elapsed_seconds": float(time.time() - t0),
     }
-    with open(MODELS_DIR / "metrics_summary.json", "w", encoding="utf-8") as f:
+    with open(METRICS_SUMMARY_PATH, "w", encoding="utf-8") as f:
         json.dump(summary_payload, f, indent=2, ensure_ascii=False)
 
-    print(f"[SUCCESS] Pipeline completed in {time.time() - t0:.1f}s! Summary saved to {MODELS_DIR / 'metrics_summary.json'}.")
+    print(f"[SUCCESS] Pipeline completed in {time.time() - t0:.1f}s! Summary saved to {METRICS_SUMMARY_PATH}.")
 
 
 if __name__ == "__main__":

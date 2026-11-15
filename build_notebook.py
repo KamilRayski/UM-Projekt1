@@ -1,228 +1,242 @@
-import base64
-import json
+#!/usr/bin/env python3
+"""Generate ``notebooks/PneumoniaMNIST_Analiza_i_Modelowanie.ipynb`` from current pipeline artifacts."""
+
+from __future__ import annotations
+
+import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
-import pandas as pd
-import nbformat
-from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell, new_output
 
-PROJECT_DIR = Path("/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1")
+import nbformat as nbf
+
+from config import FIGURES_DIR, METRICS_SUMMARY_PATH, NOTEBOOK_PATH, ensure_runtime_dirs
+from report_metrics import hyperparam_markdown_section, load_summary
 
 
-def img_output(img_path: Path):
-    b64 = base64.b64encode(img_path.read_bytes()).decode("ascii")
-    return new_output(
-        "display_data",
-        data={"image/png": b64, "text/plain": f"<IPython.core.display.Image: {img_path.name}>"}
+def _md(text: str) -> nbf.NotebookNode:
+    return nbf.v4.new_markdown_cell(textwrap.dedent(text).strip() + "\n")
+
+
+def _code(text: str) -> nbf.NotebookNode:
+    return nbf.v4.new_code_cell(textwrap.dedent(text).strip() + "\n")
+
+
+def build_notebook_cells(summary: dict) -> list[nbf.NotebookNode]:
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    cells: list[nbf.NotebookNode] = []
+
+    cells.append(
+        _md(
+            f"""
+            # PneumoniaMNIST – Klasyfikacja zdjęć rentgenowskich płuc w kierunku zapalenia płuc
+            **Przedmiot:** Uczenie Maszynowe w Diagnostyce Medycznej (Politechnika Krakowska)  
+            **Zespół:** Kamil Rayski, Miłosz Pabis  
+            **Zbiór danych:** [Kaggle: Chest X-Ray Images (Pneumonia)](https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia) / PneumoniaMNIST ($n = 5\\,856$ zdjęć RTG)
+
+            *Notatnik wygenerowany automatycznie (`build_notebook.py`, {generated}) na podstawie bieżących artefaktów w `models/` i `figures/`.*
+
+            ---
+            ## 1. Wstęp i pobranie danych (`kagglehub`)
+            Pełny potok trenowania i ewaluacji: `uv run python run_pipeline.py` (grupowy podział walidacyjny, potoki sklearn, CNN, bootstrap na teście).
+            """
+        )
     )
 
+    cells.append(
+        _code(
+            """
+            import os
+            import json
+            from pathlib import Path
 
-def df_output(df: pd.DataFrame):
-    return new_output(
-        "display_data",
-        data={"text/html": df.to_html(), "text/plain": df.to_string()}
+            import numpy as np
+            import pandas as pd
+            import matplotlib.pyplot as plt
+            from IPython.display import Image as IPyImage, display
+
+            from config import (
+                DATA_DIR,
+                DATASET_METADATA_PATH,
+                FIGURES_DIR,
+                KAGGLE_DATASET_ID,
+                METRICS_SUMMARY_PATH,
+            )
+
+            os.environ["KAGGLEHUB_CACHE"] = str(DATA_DIR)
+
+            # Opcjonalnie: pobranie zbioru (pomijane, jeśli cache już istnieje)
+            try:
+                import kagglehub
+                path = kagglehub.dataset_download(KAGGLE_DATASET_ID)
+                print("Path to dataset files:", path)
+            except Exception as exc:
+                print("kagglehub download skipped:", exc)
+            """
+        )
     )
 
+    cells.append(
+        _md(
+            """
+            ## 2. Eksploracyjna Analiza Danych (EDA)
+            Wczytujemy metadane $5\\,856$ zdjęć RTG. Walidacja $n=524$ pochodzi ze **stratyfikowanego, grupowego** podziału
+            (`StratifiedGroupKFold`) — ten sam pacjent/studium nie występuje w `train` i `val`.
+            """
+        )
+    )
 
-def create_notebook():
-    nb = new_notebook()
+    cells.append(
+        _code(
+            """
+            meta_df = pd.read_csv(DATASET_METADATA_PATH)
+            print(f"Łączna liczba zdjęć RTG: {len(meta_df)}")
+            print("\\n--- Oryginalny podział (Kaggle) ---")
+            display(pd.crosstab(meta_df["orig_split"], meta_df["label_name"], margins=True))
+            print("\\n--- Skorygowany podział (PneumoniaMNIST + grupy pacjent/studium) ---")
+            display(pd.crosstab(meta_df["split"], meta_df["label_name"], margins=True))
+            if "study_group" in meta_df.columns:
+                print("\\nLiczba unikalnych grup study_group per split:")
+                display(meta_df.groupby("split")["study_group"].nunique().to_frame("Liczba grup"))
+            print("\\n--- Podział etiologiczny ---")
+            display(meta_df["subtype"].value_counts().to_frame("Liczba zdjęć"))
+
+            with open(METRICS_SUMMARY_PATH, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            display(pd.DataFrame([summary.get("leakage_audit", {})]).T)
+            """
+        )
+    )
+
+    cells.append(
+        _code(
+            """
+            for fig in ("fig1_class_distribution.png", "fig2_sample_xray_grid.png", "fig3_image_stats_eda.png"):
+                display(IPyImage(filename=str(FIGURES_DIR / fig)))
+            """
+        )
+    )
+
+    cells.append(
+        _md(
+            """
+            ## 3. Przetwarzanie danych, Inżynieria Cech i Redukcja Wymiarowości (PCA)
+            Klasyczne modele: $64\\times 64$ px + 17 cech domenowych + PCA ($k=100$) wewnątrz potoku sklearn.
+            Sieć CNN: $128\\times 128$ px, augmentacja geometryczna, ważona `CrossEntropyLoss`.
+            """
+        )
+    )
+
+    cells.append(_code("display(IPyImage(filename=str(FIGURES_DIR / 'fig4_pca_analysis.png')))"))
+
+    cells.append(_md(hyperparam_markdown_section(summary)))
+
+    cells.append(
+        _code(
+            """
+            from report_metrics import (
+                build_hyperparams_dataframe,
+                build_paired_bootstrap_dataframe,
+                build_results_dataframe,
+                build_thresholds_dataframe,
+            )
+
+            with open(METRICS_SUMMARY_PATH, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+
+            print("=== Hiperparametry ===")
+            display(build_hyperparams_dataframe(summary))
+            print("=== Progi walidacyjne (raw + Platt) ===")
+            display(build_thresholds_dataframe(summary))
+            print("=== Metryki (walidacja / test @0.5 / test @próg z walidacji) ===")
+            display(build_results_dataframe(summary))
+            pairs = build_paired_bootstrap_dataframe(summary)
+            if len(pairs):
+                print("=== Paired bootstrap ROC-AUC (test) ===")
+                display(pairs)
+            """
+        )
+    )
+
+    cells.append(
+        _code(
+            """
+            for fig in (
+                "fig7_cnn_training_curves.png",
+                "fig5_model_comparison_roc_pr.png",
+                "fig6_confusion_matrices.png",
+            ):
+                display(IPyImage(filename=str(FIGURES_DIR / fig)))
+            """
+        )
+    )
+
+    cells.append(
+        _md(
+            """
+            ## 5. Wyjaśnialność Modeli (XAI) oraz Analiza Błędów
+            Mapy istotności / Grad-CAM oraz analiza FP/FN CNN (próg Platt z walidacji).
+            """
+        )
+    )
+
+    cells.append(
+        _code(
+            """
+            with open(METRICS_SUMMARY_PATH, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            display(IPyImage(filename=str(FIGURES_DIR / "fig8_explainability_gradcam_importance.png")))
+            display(IPyImage(filename=str(FIGURES_DIR / "fig9_error_analysis.png")))
+            if "subtype_test_accuracy_cnn" in summary:
+                display(pd.DataFrame(summary["subtype_test_accuracy_cnn"]).T)
+            """
+        )
+    )
+
+    cells.append(
+        _md(
+            """
+            ## 6. Implementacja – Streamlit (`app.py`)
+            Skalibrowane P(Platt), osobne progi walidacyjne dla każdego modelu.
+
+            ```bash
+            uv run streamlit run app.py
+            ```
+            """
+        )
+    )
+
+    cells.append(_code("display(IPyImage(filename=str(FIGURES_DIR / 'fig10_ui_preview.png')))"))
+
+    return cells
+
+
+def build_notebook(output_path=None) -> Path:
+    ensure_runtime_dirs()
+    if not METRICS_SUMMARY_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing {METRICS_SUMMARY_PATH}. Run `uv run python run_pipeline.py` first."
+        )
+    summary = load_summary()
+    out = Path(output_path or NOTEBOOK_PATH)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    nb = nbf.v4.new_notebook()
     nb.metadata["kernelspec"] = {
         "display_name": "Python 3",
         "language": "python",
-        "name": "python3"
+        "name": "python3",
     }
+    nb.metadata["language_info"] = {"name": "python", "pygments_lexer": "ipython3"}
+    nb.cells = build_notebook_cells(summary)
 
-    meta_df = pd.read_csv(PROJECT_DIR / "models/dataset_metadata.csv")
-    with open(PROJECT_DIR / "models/metrics_summary.json", "r", encoding="utf-8") as f:
-        summary = json.load(f)
+    nbf.write(nb, out)
+    print(f"[SUCCESS] Wrote notebook: {out} ({len(nb.cells)} cells)")
+    return out
 
-    c1 = new_code_cell(
-        "import os\n"
-        "import json\n"
-        "from pathlib import Path\n"
-        "import numpy as np\n"
-        "import pandas as pd\n"
-        "import matplotlib.pyplot as plt\n"
-        "from PIL import Image\n"
-        "from IPython.display import display, Image as IPyImage\n"
-        "import kagglehub\n\n"
-        "# Download latest version\n"
-        "path = kagglehub.dataset_download('paultimothymooney/chest-xray-pneumonia')\n"
-        "print('Path to dataset files:', path)"
-    )
-    c1.execution_count = 1
-    c1.outputs = [
-        new_output(
-            "stream",
-            name="stdout",
-            text=f"Path to dataset files: {PROJECT_DIR / 'data/datasets/paultimothymooney/chest-xray-pneumonia/versions/2'}\n"
-        )
-    ]
 
-    c2 = new_code_cell(
-        "PROJECT_DIR = Path('/Users/kamil/Desktop/STUDIA/Magisterka/SEM2/UM/PROJEKT1')\n"
-        "meta_df = pd.read_csv(PROJECT_DIR / 'models/dataset_metadata.csv')\n"
-        "print(f'Łączna liczba zdjęć RTG: {len(meta_df)}')\n"
-        "print('\\n--- Oryginalny podział (Kaggle) ---')\n"
-        "display(pd.crosstab(meta_df['orig_split'], meta_df['label_name'], margins=True))\n"
-        "print('\\n--- Skorygowany podział stratyfikowany (standard PneumoniaMNIST) ---')\n"
-        "display(pd.crosstab(meta_df['split'], meta_df['label_name'], margins=True))\n"
-        "print('\\n--- Podział etiologiczny (NORMAL vs BACTERIA vs VIRUS) ---')\n"
-        "display(meta_df['subtype'].value_counts().to_frame('Liczba zdjęć'))"
-    )
-    c2.execution_count = 2
-    c2.outputs = [
-        new_output("stream", name="stdout", text=f"Łączna liczba zdjęć RTG: {len(meta_df)}\n\n--- Oryginalny podział (Kaggle) ---\n"),
-        df_output(pd.crosstab(meta_df["orig_split"], meta_df["label_name"], margins=True)),
-        new_output("stream", name="stdout", text="\n--- Skorygowany podział stratyfikowany (standard PneumoniaMNIST) ---\n"),
-        df_output(pd.crosstab(meta_df["split"], meta_df["label_name"], margins=True)),
-        new_output("stream", name="stdout", text="\n--- Podział etiologiczny (NORMAL vs BACTERIA vs VIRUS) ---\n"),
-        df_output(meta_df["subtype"].value_counts().to_frame("Liczba zdjęć"))
-    ]
-
-    c3 = new_code_cell(
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig1_class_distribution.png')))\n"
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig2_sample_xray_grid.png')))\n"
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig3_image_stats_eda.png')))"
-    )
-    c3.execution_count = 3
-    c3.outputs = [
-        img_output(PROJECT_DIR / "figures/fig1_class_distribution.png"),
-        img_output(PROJECT_DIR / "figures/fig2_sample_xray_grid.png"),
-        img_output(PROJECT_DIR / "figures/fig3_image_stats_eda.png"),
-    ]
-
-    c4 = new_code_cell("display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig4_pca_analysis.png')))")
-    c4.execution_count = 4
-    c4.outputs = [img_output(PROJECT_DIR / "figures/fig4_pca_analysis.png")]
-
-    rows = []
-    for m_name, res in summary["results_summary"].items():
-        for split_key, split_label in [("val", "Walidacyjny (n=524)"), ("test_default", "Testowy (próg 0.50)"), ("test_calibrated", "Testowy (kalibrowany)")]:
-            d = res[split_key]
-            rows.append({
-                "Model": m_name,
-                "Zbiór / Tryb": split_label,
-                "Accuracy [%]": round(d["accuracy"] * 100, 2),
-                "Balanced Acc [%]": round(d["balanced_accuracy"] * 100, 2),
-                "Precision [%]": round(d["precision"] * 100, 2),
-                "Recall [%]": round(d["recall"] * 100, 2),
-                "Specificity [%]": round(d["specificity"] * 100, 2),
-                "F1-score [%]": round(d["f1"] * 100, 2),
-                "ROC-AUC": round(d["roc_auc"], 4),
-                "PR-AUC": round(d["pr_auc"], 4)
-            })
-    results_df = pd.DataFrame(rows)
-
-    c5 = new_code_cell(
-        "with open(PROJECT_DIR / 'models/metrics_summary.json', 'r', encoding='utf-8') as f:\n"
-        "    summary = json.load(f)\n\n"
-        "rows = []\n"
-        "for m_name, res in summary['results_summary'].items():\n"
-        "    for split_key, split_label in [('val', 'Walidacyjny (n=524)'), ('test_default', 'Testowy (próg 0.50)'), ('test_calibrated', 'Testowy (kalibrowany)')]:\n"
-        "        d = res[split_key]\n"
-        "        rows.append({\n"
-        "            'Model': m_name,\n"
-        "            'Zbiór / Tryb': split_label,\n"
-        "            'Accuracy [%]': round(d['accuracy']*100, 2),\n"
-        "            'Balanced Acc [%]': round(d['balanced_accuracy']*100, 2),\n"
-        "            'Precision [%]': round(d['precision']*100, 2),\n"
-        "            'Recall [%]': round(d['recall']*100, 2),\n"
-        "            'Specificity [%]': round(d['specificity']*100, 2),\n"
-        "            'F1-score [%]': round(d['f1']*100, 2),\n"
-        "            'ROC-AUC': round(d['roc_auc'], 4),\n"
-        "            'PR-AUC': round(d['pr_auc'], 4)\n"
-        "        })\n"
-        "results_df = pd.DataFrame(rows)\n"
-        "display(results_df)"
-    )
-    c5.execution_count = 5
-    c5.outputs = [df_output(results_df)]
-
-    c6 = new_code_cell(
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig7_cnn_training_curves.png')))\n"
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig5_model_comparison_roc_pr.png')))\n"
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig6_confusion_matrices.png')))"
-    )
-    c6.execution_count = 6
-    c6.outputs = [
-        img_output(PROJECT_DIR / "figures/fig7_cnn_training_curves.png"),
-        img_output(PROJECT_DIR / "figures/fig5_model_comparison_roc_pr.png"),
-        img_output(PROJECT_DIR / "figures/fig6_confusion_matrices.png"),
-    ]
-
-    c7 = new_code_cell(
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig8_explainability_gradcam_importance.png')))\n"
-        "display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig9_error_analysis.png')))"
-    )
-    c7.execution_count = 7
-    c7.outputs = [
-        img_output(PROJECT_DIR / "figures/fig8_explainability_gradcam_importance.png"),
-        img_output(PROJECT_DIR / "figures/fig9_error_analysis.png"),
-    ]
-
-    c8 = new_code_cell("display(IPyImage(filename=str(PROJECT_DIR / 'figures/fig10_ui_preview.png')))")
-    c8.execution_count = 8
-    c8.outputs = [img_output(PROJECT_DIR / "figures/fig10_ui_preview.png")]
-
-    nb.cells = [
-        new_markdown_cell(
-            "# PneumoniaMNIST – Klasyfikacja zdjęć rentgenowskich płuc w kierunku zapalenia płuc\n"
-            "**Przedmiot:** Uczenie Maszynowe w Diagnostyce Medycznej (Politechnika Krakowska)  \n"
-            "**Zespół:** Kamil Rayski, Miłosz Pabis  \n"
-            "**Zbiór danych:** [Kaggle: Chest X-Ray Images (Pneumonia)](https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia) / PneumoniaMNIST ($n = 5\\,856$ zdjęć RTG)\n\n"
-            "---\n"
-            "## 1. Wstęp i pobranie danych (`kagglehub`)\n"
-            "Celem projektu jest budowa, optymalizacja oraz wyjaśnialna ewaluacja modeli uczenia maszynowego (Regresja Logistyczna, Random Forest, SVM z jądrem RBF) "
-            "oraz głębokiej sieci konwolucyjnej (`PneumoniaCNN` w PyTorch) do wykrywania zapalenia płuc na pediatrycznych zdjęciach RTG klatki piersiowej."
-        ),
-        c1,
-        new_markdown_cell(
-            "## 2. Eksploracyjna Analiza Danych (EDA)\n"
-            "Wczytujemy wygenerowane metadane wszystkich $5\\,856$ zdjęć RTG, porównujemy oryginalny podział zbioru z repozytorium Kaggle "
-            "(w którym podzbiór `val` liczył jedynie 16 zdjęć) ze skorygowanym podziałem stratyfikowanym zgodnym ze standardem **PneumoniaMNIST** "
-            "($4\\,708$ `train`, $524$ `val`, $624$ `test`)."
-        ),
-        c2,
-        c3,
-        new_markdown_cell(
-            "## 3. Przetwarzanie danych, Inżynieria Cech i Redukcja Wymiarowości (PCA)\n"
-            "- Dla klasycznych algorytmów ML obrazy zostały przeskalowane do wymiaru $64\\times 64$ px ($4\\,096$ cech) i uzupełnione o **17 cech domenowych** (statystyki kwantylowe, asymetria lewego i prawego płuca, strefy górna/środkowa/dolna, gradienty krawędziowe).\n"
-            "- Zastosowano transformację `StandardScaler` oraz **Analizę Składowych Głównych (PCA)** z $k=100$ komponentami (*Eigenlungs*), które wyjaśniają **91,47%** wariancji."
-        ),
-        c4,
-        new_markdown_cell(
-            "## 4. Modelowanie, Strojenie Hiperparametrów i Ewaluacja\n"
-            "Porównano cztery modele:\n"
-            "1. **Logistic Regression (PCA + 17 cech domenowych)** – `GridSearchCV` ($C=10.0$, `class_weight='balanced'`)\n"
-            "2. **Random Forest Classifier** – `GridSearchCV` (`n_estimators=300`, `max_depth=24`, `class_weight='balanced_subsample'`)\n"
-            "3. **SVM z jądrem RBF (PCA + 17 cech domenowych)** – `GridSearchCV` ($C=5.0$, `gamma='scale'`, `class_weight='balanced'`)\n"
-            "4. **PneumoniaCNN (PyTorch)** – 4-blokowa głęboka sieć konwolucyjna ($128\\times 128$ px) z warstwami `BatchNorm2d`, `GlobalAveragePooling` i ważoną funkcją straty `CrossEntropyLoss`."
-        ),
-        c5,
-        c6,
-        new_markdown_cell(
-            "## 5. Wyjaśnialność Modeli (XAI: Feature Importance + Grad-CAM) oraz Analiza Błędów\n"
-            "Poniżej przedstawiono dwuwymiarowe mapy istotności pikseli (Random Forest oraz odwrotna transformacja wag Regresji Logistycznej przez PCA), "
-            "ranking cech domenowych oraz mapy cieplne **Grad-CAM** wygenerowane z ostatniego bloku konwolucyjnego sieci `PneumoniaCNN`."
-        ),
-        c7,
-        new_markdown_cell(
-            "## 6. Implementacja – Interfejs diagnostyczny Streamlit (`app.py`)\n"
-            "Aplikację webową można uruchomić lokalnie poleceniem:\n"
-            "```bash\n"
-            "streamlit run app.py\n"
-            "```\n"
-            "Poniżej widoczny jest wygenerowany podgląd działania panelu diagnostycznego dla pacjenta z bakteryjnym zapaleniem płuc oraz pacjenta zdrowego."
-        ),
-        c8
-    ]
-
-    nb_path = PROJECT_DIR / "PneumoniaMNIST_Analiza_i_Modelowanie.ipynb"
-    with open(nb_path, "w", encoding="utf-8") as f:
-        nbformat.write(nb, f)
-    print(f"[SUCCESS] Created complete notebook with embedded outputs at: {nb_path}")
+def main() -> None:
+    build_notebook()
 
 
 if __name__ == "__main__":
-    create_notebook()
-
+    main()
