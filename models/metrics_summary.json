@@ -1,0 +1,287 @@
+{
+  "dataset_counts": {
+    "total": 5856,
+    "orig_splits": {
+      "NORMAL": {
+        "test": 234,
+        "train": 1341,
+        "val": 8
+      },
+      "PNEUMONIA": {
+        "test": 390,
+        "train": 3875,
+        "val": 8
+      }
+    },
+    "corrected_splits": {
+      "NORMAL": {
+        "test": 234,
+        "train": 1214,
+        "val": 135
+      },
+      "PNEUMONIA": {
+        "test": 390,
+        "train": 3494,
+        "val": 389
+      }
+    },
+    "subtypes": {
+      "PNEUMONIA_BACTERIA": 2780,
+      "NORMAL": 1583,
+      "PNEUMONIA_VIRUS": 1493
+    },
+    "width_mean": 1327.880806010929,
+    "width_std": 363.5009216420258,
+    "height_mean": 970.6890368852459,
+    "height_std": 383.39211748991636,
+    "intensity_normal_mean": 0.4809634624518553,
+    "intensity_pneumonia_mean": 0.4817304932140729,
+    "std_normal_mean": 0.23399873113639733,
+    "std_pneumonia_mean": 0.21264517486353487
+  },
+  "pca_explained_variance_100": 0.9147225618362427,
+  "best_params_summary": {
+    "Logistic Regression": {
+      "best_params": {
+        "C": 10.0,
+        "class_weight": "balanced"
+      },
+      "cv_roc_auc": 0.9917240335722124
+    },
+    "Random Forest": {
+      "best_params": {
+        "class_weight": "balanced_subsample",
+        "max_depth": 24,
+        "n_estimators": 300
+      },
+      "cv_roc_auc": 0.986475529263123
+    },
+    "SVM (RBF)": {
+      "best_params": {
+        "C": 5.0,
+        "class_weight": "balanced",
+        "gamma": "scale"
+      },
+      "cv_roc_auc": 0.9953244926045723
+    },
+    "PneumoniaCNN (PyTorch)": {
+      "best_params": {
+        "img_size": "128x128",
+        "optimizer": "AdamW (lr=1e-3, wd=1e-4)",
+        "scheduler": "CosineAnnealingLR",
+        "loss": "Weighted CrossEntropy",
+        "epochs": 15
+      },
+      "cv_roc_auc": 0.9979815290869275
+    }
+  },
+  "results_summary": {
+    "Logistic Regression": {
+      "val": {
+        "accuracy": 0.9541984732824428,
+        "balanced_accuracy": 0.9473864610111397,
+        "precision": 0.9765013054830287,
+        "recall": 0.961439588688946,
+        "specificity": 0.9333333333333333,
+        "f1": 0.9689119170984456,
+        "roc_auc": 0.9891840426544797,
+        "pr_auc": 0.9958743701105603,
+        "tn": 126,
+        "fp": 9,
+        "fn": 15,
+        "tp": 374,
+        "threshold": 0.5
+      },
+      "test_default": {
+        "accuracy": 0.7371794871794872,
+        "balanced_accuracy": 0.6572649572649573,
+        "precision": 0.710820895522388,
+        "recall": 0.9769230769230769,
+        "specificity": 0.33760683760683763,
+        "f1": 0.8228941684665226,
+        "roc_auc": 0.8869055445978523,
+        "pr_auc": 0.9260736616333017,
+        "tn": 79,
+        "fp": 155,
+        "fn": 9,
+        "tp": 381,
+        "threshold": 0.5
+      },
+      "test_calibrated": {
+        "accuracy": 0.8141025641025641,
+        "balanced_accuracy": 0.805982905982906,
+        "precision": 0.8605263157894737,
+        "recall": 0.8384615384615385,
+        "specificity": 0.7735042735042735,
+        "f1": 0.8493506493506493,
+        "roc_auc": 0.8869055445978523,
+        "pr_auc": 0.9260736616333017,
+        "tn": 181,
+        "fp": 53,
+        "fn": 63,
+        "tp": 327,
+        "threshold": 0.9951837658882141
+      },
+      "opt_threshold": 0.9951837658882141
+    },
+    "Random Forest": {
+      "val": {
+        "accuracy": 0.9618320610687023,
+        "balanced_accuracy": 0.9380177092259354,
+        "precision": 0.9624060150375939,
+        "recall": 0.987146529562982,
+        "specificity": 0.8888888888888888,
+        "f1": 0.9746192893401016,
+        "roc_auc": 0.9900599828620393,
+        "pr_auc": 0.9961218966744153,
+        "tn": 120,
+        "fp": 15,
+        "fn": 5,
+        "tp": 384,
+        "threshold": 0.5
+      },
+      "test_default": {
+        "accuracy": 0.7660256410256411,
+        "balanced_accuracy": 0.6888888888888889,
+        "precision": 0.7284644194756554,
+        "recall": 0.9974358974358974,
+        "specificity": 0.3803418803418803,
+        "f1": 0.841991341991342,
+        "roc_auc": 0.9348948060486522,
+        "pr_auc": 0.9589185048173241,
+        "tn": 89,
+        "fp": 145,
+        "fn": 1,
+        "tp": 389,
+        "threshold": 0.5
+      },
+      "test_calibrated": {
+        "accuracy": 0.8814102564102564,
+        "balanced_accuracy": 0.8675213675213675,
+        "precision": 0.8910891089108911,
+        "recall": 0.9230769230769231,
+        "specificity": 0.811965811965812,
+        "f1": 0.906801007556675,
+        "roc_auc": 0.9348948060486522,
+        "pr_auc": 0.9589185048173241,
+        "tn": 190,
+        "fp": 44,
+        "fn": 30,
+        "tp": 360,
+        "threshold": 0.8036015107984612
+      },
+      "opt_threshold": 0.8036015107984612
+    },
+    "SVM (RBF)": {
+      "val": {
+        "accuracy": 0.9732824427480916,
+        "balanced_accuracy": 0.9650766447681616,
+        "precision": 0.9820051413881749,
+        "recall": 0.9820051413881749,
+        "specificity": 0.9481481481481482,
+        "f1": 0.9820051413881749,
+        "roc_auc": 0.99550604589165,
+        "pr_auc": 0.9984410293090539,
+        "tn": 128,
+        "fp": 7,
+        "fn": 7,
+        "tp": 382,
+        "threshold": 0.5
+      },
+      "test_default": {
+        "accuracy": 0.7660256410256411,
+        "balanced_accuracy": 0.6914529914529914,
+        "precision": 0.7310606060606061,
+        "recall": 0.9897435897435898,
+        "specificity": 0.39316239316239315,
+        "f1": 0.840958605664488,
+        "roc_auc": 0.9039064212141136,
+        "pr_auc": 0.932737638000983,
+        "tn": 92,
+        "fp": 142,
+        "fn": 4,
+        "tp": 386,
+        "threshold": 0.5
+      },
+      "test_calibrated": {
+        "accuracy": 0.8269230769230769,
+        "balanced_accuracy": 0.8273504273504273,
+        "precision": 0.8895027624309392,
+        "recall": 0.8256410256410256,
+        "specificity": 0.8290598290598291,
+        "f1": 0.8563829787234043,
+        "roc_auc": 0.9039064212141136,
+        "pr_auc": 0.932737638000983,
+        "tn": 194,
+        "fp": 40,
+        "fn": 68,
+        "tp": 322,
+        "threshold": 0.9942337082384625
+      },
+      "opt_threshold": 0.9942337082384625
+    },
+    "PneumoniaCNN (PyTorch)": {
+      "val": {
+        "accuracy": 0.9809160305343512,
+        "balanced_accuracy": 0.9798914595829763,
+        "precision": 0.9922077922077922,
+        "recall": 0.9820051413881749,
+        "specificity": 0.9777777777777777,
+        "f1": 0.9870801033591732,
+        "roc_auc": 0.9979815290869275,
+        "pr_auc": 0.9992737211680086,
+        "tn": 132,
+        "fp": 3,
+        "fn": 7,
+        "tp": 382,
+        "threshold": 0.5
+      },
+      "test_default": {
+        "accuracy": 0.8301282051282052,
+        "balanced_accuracy": 0.7769230769230769,
+        "precision": 0.7909836065573771,
+        "recall": 0.9897435897435898,
+        "specificity": 0.5641025641025641,
+        "f1": 0.8792710706150342,
+        "roc_auc": 0.9420721016874862,
+        "pr_auc": 0.9595596529134883,
+        "tn": 132,
+        "fp": 102,
+        "fn": 4,
+        "tp": 386,
+        "threshold": 0.5
+      },
+      "test_calibrated": {
+        "accuracy": 0.8814102564102564,
+        "balanced_accuracy": 0.8811965811965812,
+        "precision": 0.9247311827956989,
+        "recall": 0.882051282051282,
+        "specificity": 0.8803418803418803,
+        "f1": 0.9028871391076115,
+        "roc_auc": 0.9420721016874862,
+        "pr_auc": 0.9595596529134883,
+        "tn": 206,
+        "fp": 28,
+        "fn": 46,
+        "tp": 344,
+        "threshold": 0.991354763507843
+      },
+      "opt_threshold": 0.991354763507843
+    }
+  },
+  "subtype_test_accuracy_cnn": {
+    "Zdrowe (NORMAL)": {
+      "accuracy_pct": 88.03418803418803,
+      "count": 234
+    },
+    "Bakteryjne (BACTERIA)": {
+      "accuracy_pct": 90.49586776859503,
+      "count": 242
+    },
+    "Wirusowe (VIRUS)": {
+      "accuracy_pct": 84.45945945945947,
+      "count": 148
+    }
+  },
+  "elapsed_seconds": 813.9861690998077
+}
